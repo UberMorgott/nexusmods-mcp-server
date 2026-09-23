@@ -9,6 +9,7 @@ import { registerRestApiTools } from "./tools/rest-api.js";
 import { registerGraphqlTools } from "./tools/graphql-api.js";
 import { registerUploadTools } from "./tools/upload-api.js";
 import { registerWebTools } from "./tools/web-api.js";
+import { registerWebModTools } from "./tools/web-mod.js";
 
 // Sent to MCP clients on initialize so agents know the workflows without trial and error.
 function buildInstructions(hasKey: boolean): string {
@@ -45,6 +46,7 @@ export async function createServer(): Promise<{ server: McpServer; webClient: We
   const webClient = new WebClient(config);
   webClient.init();
   registerWebTools(server, webClient, api);
+  registerWebModTools(server, webClient, api);
 
   console.error(
     `[nexusmods-mcp] ready (api key: ${api.hasKey() ? "yes" : "no"}, web cookies: ${webClient.hasCookies() ? "loaded" : "none"})`,

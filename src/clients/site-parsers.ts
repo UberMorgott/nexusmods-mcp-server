@@ -5,18 +5,39 @@
 // (no imports, no references to module scope). Fetches a site URL with the page's
 // session and parses the HTML with the browser's own DOMParser.
 
-export type ParseKind = "modComments" | "modThreadId" | "forumPage" | "forumTopic";
+export type ParseKind =
+  | "modComments"
+  | "modThreadId"
+  | "forumPage"
+  | "forumTopic"
+  | "forumSession"
+  | "invisionReplyForm"
+  | "invisionComposeForm"
+  | "pmList"
+  | "modBugs"
+  | "modBugReplies"
+  | "bugReportForm"
+  | "hideCommentPopup";
 
 export interface ParseArgs {
   kind: ParseKind;
   url: string;
+  /** Optional form POST (urlencoded), for widgets the site loads by POST. */
+  form?: Record<string, string>;
 }
 
-export async function fetchAndParse({ kind, url }: ParseArgs): Promise<any> {
+export async function fetchAndParse({ kind, url, form }: ParseArgs): Promise<any> {
   // www.nexusmods.com answers these page/widget fetches only as XHR (as its own jQuery
   // front-end sends them); without the header it returns 403.
   const xhr = new URL(url).hostname === "www.nexusmods.com";
-  const r = await fetch(url, { credentials: "include", headers: xhr ? { "X-Requested-With": "XMLHttpRequest" } : {} });
+  const headers: Record<string, string> = xhr ? { "X-Requested-With": "XMLHttpRequest" } : {};
+  if (form) headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8";
+  const r = await fetch(url, {
+    credentials: "include",
+    headers,
+    method: form ? "POST" : "GET",
+    body: form ? new URLSearchParams(form).toString() : undefined,
+  });
   const html = await r.text();
   if (!r.ok) return { error: `HTTP ${r.status}: ${html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300)}` };
 
@@ -26,7 +47,34 @@ export async function fetchAndParse({ kind, url }: ParseArgs): Promise<any> {
     return { threadId: m ? Number(m[1]) : null };
   }
 
+  if (kind === "forumSession") {
+    // Invision page settings block: `memberID: 123` (0 for guests) and `csrfKey: "..."`.
+    const member = html.match(/memberID:\s*(\d+)/);
+    const csrf = html.match(/csrfKey:\s*"(\w+)"/);
+    return { memberId: member ? Number(member[1]) : 0, csrfKey: csrf ? csrf[1] : null };
+  }
+
   const doc = new DOMParser().parseFromString(html, "text/html");
+
+  // jQuery .serialize() semantics: named, enabled controls; checkboxes/radios only when
+  // checked; no file/submit/button controls.
+  const serialize = (f: Element): [string, string][] => {
+    const out: [string, string][] = [];
+    f.querySelectorAll("input,textarea,select").forEach((el) => {
+      const i = el as HTMLInputElement;
+      const name = i.getAttribute("name");
+      if (!name || i.hasAttribute("disabled")) return;
+      const type = (i.getAttribute("type") || "").toLowerCase();
+      if (["file", "submit", "button", "reset", "image"].includes(type)) return;
+      if ((type === "checkbox" || type === "radio") && !i.hasAttribute("checked")) return;
+      if (el.tagName === "SELECT") {
+        const opt = el.querySelector("option[selected]") || el.querySelector("option");
+        out.push([name, opt?.getAttribute("value") ?? opt?.textContent ?? ""]);
+      } else if (el.tagName === "TEXTAREA") out.push([name, el.textContent || ""]);
+      else out.push([name, i.getAttribute("value") ?? (type === "checkbox" || type === "radio" ? "on" : "")]);
+    });
+    return out;
+  };
 
   // Text with line breaks for <br> and block elements; blank lines collapsed.
   const textOf = (el: Element | null | undefined): string => {
@@ -108,18 +156,151 @@ export async function fetchAndParse({ kind, url }: ParseArgs): Promise<any> {
   }
 
   if (kind === "forumTopic") {
-    const posts = Array.from(doc.querySelectorAll("article.cPost")).map((art) => ({
+    // Topic posts are article.cPost; messenger conversation posts are article.ipsComment.
+    const posts = Array.from(doc.querySelectorAll("article.cPost, article.ipsComment")).map((art) => ({
       id: art.id.replace("elComment_", ""),
-      author: txt(art.querySelector("aside .cAuthorPane_author a")) || txt(art.querySelector(".cAuthorPane_author a")) || "?",
+      author:
+        txt(art.querySelector("aside .cAuthorPane_author a")) ||
+        txt(art.querySelector(".cAuthorPane_author a")) ||
+        txt(art.querySelector(".ipsComment_author a")) ||
+        "?",
       date: art.querySelector("time[datetime]")?.getAttribute("datetime") || "",
       text: textOf(art.querySelector("[data-role='commentContent']")),
     }));
     return {
-      title: txt(doc.querySelector("h1.ipsType_pageTitle")) || doc.title,
+      // Messenger pages' h1 is the inbox header; the conversation title is in <title>.
+      title: (url.includes("/messenger/") ? "" : txt(doc.querySelector("h1.ipsType_pageTitle"))) || doc.title.replace(/ - Nexus Mods Forums$/, ""),
       pages: Number(doc.querySelector("[data-pages]")?.getAttribute("data-pages")) || 1,
+      participants: Array.from(doc.querySelectorAll("[data-participant]")).map((p) => txt(p).replace(/\s*Send new message$/, "")),
       posts,
     };
   }
 
+  if (kind === "invisionReplyForm") {
+    // Quick-reply form rendered for members only: commentform_<id>_submitted + csrfKey +
+    // editor textarea `<prefix>_comment_<id>` (+ `_noscript` twin left empty, as with JS).
+    const f = Array.from(doc.querySelectorAll("form")).find((x) => x.querySelector("input[name^='commentform_'][name$='_submitted']"));
+    if (!f) return { error: "no reply form on this page (not logged in, topic locked, or no permission to reply)" };
+    const fields = serialize(f);
+    const editor = fields.map(([n]) => n).find((n) => /_comment_\d+$/.test(n)) || null;
+    let lastSeenId = 0;
+    doc.querySelectorAll("[data-commentid]").forEach((el) => {
+      const n = Number(el.getAttribute("data-commentid"));
+      if (n > lastSeenId) lastSeenId = n;
+    });
+    return { action: f.getAttribute("action") || url, fields, editor, lastSeenId };
+  }
+
+  if (kind === "invisionComposeForm") {
+    const f = Array.from(doc.querySelectorAll("form")).find((x) => x.querySelector("[name='messenger_to']"));
+    if (!f) return { error: "no compose form (not logged in to the forums, or messaging disabled for this account)" };
+    return { action: f.getAttribute("action") || url, fields: serialize(f) };
+  }
+
+  if (kind === "pmList") {
+    const convs = Array.from(doc.querySelectorAll("li.cMessage[data-messageid]")).map((li) => ({
+      id: li.getAttribute("data-messageid"),
+      title: txt(li.querySelector(".cMessageTitle")),
+      unread: li.classList.contains("ipsDataItem_unread"),
+      participants: txt(li.querySelector(".ipsDataItem_main > .ipsType_light")),
+      snippet: txt(li.querySelector(".ipsDataItem_meta")),
+      date: li.querySelector("time[datetime]")?.getAttribute("datetime") || "",
+    }));
+    return { pages: Number(doc.querySelector("[data-pages]")?.getAttribute("data-pages")) || 1, convs };
+  }
+
+  if (kind === "modBugs") {
+    const bugs = Array.from(doc.querySelectorAll("tr.mod-issue-row[data-issue-id]")).map((tr) => ({
+      id: tr.getAttribute("data-issue-id"),
+      title: txt(tr.querySelector("a.issue-title")),
+      status: txt(tr.querySelector("td.table-bug-status")),
+      replies: txt(tr.querySelector("td.table-bug-replies")),
+      version: txt(tr.querySelector("td.table-bug-version")),
+      priority: txt(tr.querySelector("td.table-bug-priority")),
+      lastPost: Number(tr.querySelector("td.table-bug-post time[data-date]")?.getAttribute("data-date")) || 0,
+    }));
+    return {
+      enabled: !!doc.querySelector("#tab-modbugs"),
+      canReport: !!doc.querySelector("#report-a-bug"),
+      pages: maxPage(".pagination li a"),
+      bugs,
+    };
+  }
+
+  if (kind === "modBugReplies") {
+    // ModBugReplyList: li#bug-issue-tile-<issue> (the report) then li#bug-reply-tile-<reply>.
+    const posts = Array.from(doc.querySelectorAll("li.comment[id^='bug-']")).map((li) => {
+      const body = li.querySelector(".comment-content")?.cloneNode(true) as Element | undefined;
+      body?.querySelectorAll("time, .comment-reply, script").forEach((x) => x.remove());
+      return {
+        id: li.id.replace(/^bug-(issue|reply)-tile-/, ""),
+        isReport: li.id.startsWith("bug-issue-tile-"),
+        author: txt(li.querySelector(".comment-name a")) || "?",
+        date: li.querySelector(".comment-content time[datetime]")?.getAttribute("datetime") || "",
+        text: textOf(body),
+      };
+    });
+    return {
+      posts,
+      replyToken: doc.querySelector(".add-bug-reply[data-csrf-token]")?.getAttribute("data-csrf-token") || null,
+    };
+  }
+
+  if (kind === "bugReportForm") {
+    // AddBugReportPopUp: form#add-report, token on a#submit-report.
+    const f = doc.querySelector("form#add-report");
+    return {
+      token: doc.querySelector("#submit-report[data-csrf-token]")?.getAttribute("data-csrf-token") || null,
+      message: f ? "" : txt(doc.body).slice(0, 300),
+    };
+  }
+
+  if (kind === "hideCommentPopup") {
+    // DeleteAndReportCommentPopUp: the button carries the exact request data.
+    const b = doc.querySelector(".delete-and-report-comment");
+    if (!b) return { error: `no hide option for this comment: ${txt(doc.body).slice(0, 200)}` };
+    const d = (n: string) => b.getAttribute(`data-${n}`) || "";
+    return { gameId: d("game-id"), objectId: d("object-id"), objectType: d("object-type"), commentId: d("comment-id"), status: d("status") };
+  }
+
   return { error: `unknown parse kind ${kind}` };
+}
+
+export interface SubmitArgs {
+  url: string;
+  method?: string;
+  /** urlencoded (default) or multipart form fields, in order. */
+  fields?: [string, string][];
+  multipart?: boolean;
+  /** JSON body instead of form fields. */
+  json?: unknown;
+  /** One file for a multipart upload (base64 payload). */
+  file?: { field: string; name: string; type: string; b64: string };
+  headers?: Record<string, string>;
+}
+
+/** Runs INSIDE the page: send a form/JSON/multipart request with the page's session,
+ *  exactly as the site's own scripts do. Returns status, final URL (after redirects) and body. */
+export async function submitRequest(a: SubmitArgs): Promise<{ status: number; url: string; contentType: string; body: string }> {
+  const headers: Record<string, string> = { ...(a.headers || {}) };
+  let body: BodyInit | undefined;
+  if (a.json !== undefined) {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify(a.json);
+  } else if (a.multipart || a.file) {
+    const fd = new FormData();
+    for (const [k, v] of a.fields || []) fd.append(k, v);
+    if (a.file) {
+      const bin = atob(a.file.b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      fd.append(a.file.field, new Blob([bytes], { type: a.file.type }), a.file.name);
+    }
+    body = fd;
+  } else if (a.fields) {
+    headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8";
+    body = new URLSearchParams(a.fields).toString();
+  }
+  const r = await fetch(a.url, { method: a.method || "POST", credentials: "include", headers, body });
+  return { status: r.status, url: r.url, contentType: r.headers.get("content-type") || "", body: await r.text() };
 }

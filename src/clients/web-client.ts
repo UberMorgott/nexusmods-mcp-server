@@ -7,7 +7,11 @@ import type { Config } from "../config.js";
 import type { CookieEntry } from "../utils/types.js";
 import { CookieExtractor } from "./cookie-extractor.js";
 import { BrowserClient, FORUMS_ORIGIN, WWW_ORIGIN } from "./browser-client.js";
-import { fetchAndParse, type ParseKind } from "./site-parsers.js";
+import { fetchAndParse, submitRequest, type ParseKind, type SubmitArgs } from "./site-parsers.js";
+
+function originOf(url: string): string {
+  return new URL(url).hostname === "forums.nexusmods.com" ? FORUMS_ORIGIN : WWW_ORIGIN;
+}
 
 /** GraphQL router the nexusmods.com front-end calls with the session cookie
  *  (window.env.NEXT_PUBLIC_API_PUBLIC_GRAPHQL_URI). */
@@ -169,11 +173,35 @@ export class WebClient {
 
   // ── Site operations ────────────────────────────────────────────
 
-  async parse(kind: ParseKind, url: string): Promise<any> {
-    const origin = new URL(url).hostname === "forums.nexusmods.com" ? FORUMS_ORIGIN : WWW_ORIGIN;
-    const out = await this.browser.evaluate(origin, fetchAndParse, { kind, url });
+  async parse(kind: ParseKind, url: string, form?: Record<string, string>): Promise<any> {
+    const out = await this.browser.evaluate(originOf(url), fetchAndParse, { kind, url, form });
     if (out?.error) throw new Error(out.error);
     return out;
+  }
+
+  /** Send a request from inside the site page (form, multipart upload or JSON), as the
+   *  site's own scripts do. Never throws on HTTP status. */
+  async submit(args: SubmitArgs): Promise<{ status: number; url: string; contentType: string; body: string }> {
+    return this.browser.evaluate(originOf(args.url), submitRequest, args);
+  }
+
+  /** Run a self-contained function inside the page of `origin`. */
+  async evaluate<A, R>(origin: string, fn: (arg: A) => R | Promise<R>, arg: A): Promise<R> {
+    return this.browser.evaluate(origin, fn, arg);
+  }
+
+  /** The forums (Invision) keep their own session. A nexusmods.com login carries over via
+   *  the site's SSO: opening forums /login/ with a valid session signs in silently, exactly
+   *  like clicking "Sign In" on the forums. Returns the member id and csrfKey. */
+  async ensureForumSession(): Promise<{ memberId: number; csrfKey: string }> {
+    let s = await this.parse("forumSession", `${FORUMS_ORIGIN}/`);
+    if (!s.memberId) {
+      if (!this.hasCookies()) throw new Error("Not logged in. Run web_login first.");
+      await this.browser.navigate(FORUMS_ORIGIN, `${FORUMS_ORIGIN}/login/`);
+      s = await this.parse("forumSession", `${FORUMS_ORIGIN}/`);
+      if (!s.memberId) throw new Error("Forum sign-in (SSO) failed — nexusmods.com session expired? Run web_login.");
+    }
+    return { memberId: s.memberId, csrfKey: s.csrfKey || "" };
   }
 
   /** POST/PUT a jQuery-style form to www.nexusmods.com (same-origin XHR, as the site does). */
