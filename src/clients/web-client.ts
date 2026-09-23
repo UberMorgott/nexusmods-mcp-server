@@ -34,6 +34,11 @@ export class WebClient {
     return this.cookies.length > 0;
   }
 
+  /** True while a visible sign-in window from web_login is open and being polled. */
+  loginInProgress(): boolean {
+    return this.loginPolling;
+  }
+
   private async backgroundExtract(): Promise<void> {
     try {
       const result = await new CookieExtractor().extractCookies();

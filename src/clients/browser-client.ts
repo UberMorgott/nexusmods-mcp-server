@@ -41,6 +41,8 @@ export class BrowserClient {
   private visible = false;
   private context: BrowserContext | null = null;
   private pages = new Map<string, Page>();
+  /** Visible sign-in tab (interactive login only); kept apart from the request pages. */
+  private loginPage: Page | null = null;
   private cookies: CookieEntry[] = [];
   private initPromise: Promise<void> | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -94,12 +96,31 @@ export class BrowserClient {
   }
 
   /** Open the login URL in a VISIBLE window. The hidden context is closed first — both
-   *  use the same profile, which only one Chrome process can hold at a time. */
+   *  use the same profile, which only one Chrome process can hold at a time.
+   *  The sign-in runs in its own tab, never in a pooled request page: a pooled page parked
+   *  on users.nexusmods.com would make every in-page fetch() to www/api-router fail CORS
+   *  ("TypeError: Failed to fetch") until the user finished signing in. */
   async openLoginPage(url: string): Promise<void> {
     if (this.initPromise && !this.visible) await this.close();
     await this.ensureInit(true);
-    const page = await this.pageFor(WWW_ORIGIN);
+    if (!this.context) throw new Error("Browser context not initialized");
+    const pooled = [...this.pages.values()];
+    const page = this.context.pages().find((p) => p.url() === "about:blank" && !pooled.includes(p)) ?? (await this.context.newPage());
+    this.loginPage = page;
     await this.navigateAndWaitForCf(page, url);
+  }
+
+  /** Navigate the pooled page for `origin` to `url` (e.g. an SSO hop) and wait out Cloudflare.
+   *  Returns the final URL. */
+  async navigate(origin: string, url: string): Promise<string> {
+    this.clearIdleTimer();
+    try {
+      const page = await this.pageFor(origin);
+      await this.navigateAndWaitForCf(page, url);
+      return page.url();
+    } finally {
+      this.resetIdleTimer();
+    }
   }
 
   async close(): Promise<void> {
@@ -110,6 +131,7 @@ export class BrowserClient {
     const ctx = this.context;
     this.context = null;
     this.pages.clear();
+    this.loginPage = null;
     // A persistent context has no separate Browser object, so close the context itself.
     if (ctx) {
       console.error("[browser-client] Closing Chrome");
@@ -127,9 +149,15 @@ export class BrowserClient {
   private async pageFor(origin: string): Promise<Page> {
     await this.ensureInit();
     const existing = this.pages.get(origin);
-    if (existing && !existing.isClosed()) return existing;
+    if (existing && !existing.isClosed()) {
+      // fetch() runs with the page's origin; if the site redirected the page elsewhere,
+      // bring it back first or cross-origin calls fail CORS.
+      if (pageOrigin(existing) !== origin) await this.navigateAndWaitForCf(existing, origin + "/");
+      return existing;
+    }
     if (!this.context) throw new Error("Browser context not initialized");
-    const unused = this.context.pages().find((p) => p.url() === "about:blank" && ![...this.pages.values()].includes(p));
+    const taken = [...this.pages.values(), ...(this.loginPage ? [this.loginPage] : [])];
+    const unused = this.context.pages().find((p) => p.url() === "about:blank" && !taken.includes(p));
     const page = unused ?? (await this.context.newPage());
     // `npm run dev` (tsx/esbuild keepNames) wraps named functions in __name(); define a
     // no-op in the page so functions passed to page.evaluate() still run there.
@@ -138,6 +166,8 @@ export class BrowserClient {
     console.error(`[browser-client] Navigating to ${origin}...`);
     await this.navigateAndWaitForCf(page, origin + "/");
     this.pages.set(origin, page);
+    // A request tab opened during interactive login must not cover the sign-in tab.
+    if (this.loginPage && !this.loginPage.isClosed()) await this.loginPage.bringToFront().catch(() => {});
     return page;
   }
 
@@ -307,6 +337,14 @@ export class BrowserClient {
       await new Promise((r) => setTimeout(r, 1500));
     }
     console.error(`[browser-client] Warning: CF challenge did not resolve for ${url} after ${CF_WAIT_MS}ms`);
+  }
+}
+
+function pageOrigin(page: Page): string {
+  try {
+    return new URL(page.url()).origin;
+  } catch {
+    return "";
   }
 }
 

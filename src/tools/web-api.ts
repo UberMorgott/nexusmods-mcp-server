@@ -60,8 +60,9 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
     },
     () =>
       wrap("web_status", async () => {
+        const login = web.loginInProgress() ? "Login in progress (sign-in window open). " : "";
         const who = await web.whoAmI();
-        return `${who.loggedIn ? "Logged in" : "NOT logged in"} (${who.detail}); cookies stored: ${web.hasCookies()}`;
+        return `${login}${who.loggedIn ? "Logged in" : "NOT logged in"} (${who.detail}); cookies stored: ${web.hasCookies()}`;
       }),
   );
 
