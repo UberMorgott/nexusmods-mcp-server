@@ -104,6 +104,16 @@ function decodeBBCodeInPage(list: string[]): string[] {
   );
 }
 
+/** Legacy endpoints answer 1, "1" or JSON "1" on success (the site compares loosely). */
+function isOne(body: string): boolean {
+  const t = body.trim();
+  try {
+    return Number(JSON.parse(t)) === 1;
+  } catch {
+    return t === "1";
+  }
+}
+
 export function registerWebModTools(server: McpServer, web: WebClient, api: NexusApiClient): void {
   const wrap = (name: string, fn: () => Promise<string>) => fn().then(success, (e) => error(`${name}: ${errMsg(e)}`));
 
@@ -167,7 +177,8 @@ export function registerWebModTools(server: McpServer, web: WebClient, api: Nexu
     ({ issue_id }) =>
       wrap("get_mod_bug", async () => {
         const d = await web.parse("modBugReplies", `${WWW}/Core/Libs/Common/Widgets/ModBugReplyList`, { issue_id: String(issue_id) });
-        if (!d.posts.length) return `Bug report ${issue_id} not found or not visible to you.`;
+        // A deleted/unknown issue still renders an empty report tile (id "").
+        if (!d.posts.length || !d.posts[0].id) return `Bug report ${issue_id} not found (deleted) or not visible to you.`;
         return truncate(d.posts.map((p: any) => `${p.isReport ? "REPORT" : "reply"} [${p.id}] ${p.author} (${p.date}):\n${truncate(p.text, 3000)}`).join("\n\n"));
       }),
   );
@@ -203,7 +214,8 @@ export function registerWebModTools(server: McpServer, web: WebClient, api: Nexu
         };
         if (dry_run) return dryRunReport("POST", `${WWW}/mod_bug`, Object.entries(fields), "XHR, application/x-www-form-urlencoded");
         const r = await web.postForm("/mod_bug", "POST", fields);
-        if (r.status === 200 && r.body.trim() === "1") return `Bug report "${title}" posted on ${g}/${mod_id} (see get_mod_bugs).`;
+        // The site tests `o == 1`; the body is JSON "1" (a string).
+        if (r.status === 200 && isOne(r.body)) return `Bug report "${title}" posted on ${g}/${mod_id} (see get_mod_bugs).`;
         throw new Error(`HTTP ${r.status}: ${oneLine(r.body.replace(/<[^>]*>/g, " "), 300)}`);
       }),
   );
@@ -231,6 +243,13 @@ export function registerWebModTools(server: McpServer, web: WebClient, api: Nexu
           // plain body → error
         }
         if (r.status === 200 && j?.status === true) return `Replied to bug report ${issue_id}.`;
+        // Seen live: the reply is saved but the endpoint answers HTTP 500 (rendering the new
+        // reply tile fails). Confirm by reading the thread back before reporting failure.
+        const after = await web.parse("modBugReplies", `${WWW}/Core/Libs/Common/Widgets/ModBugReplyList`, { issue_id: String(issue_id) });
+        const last = after.posts[after.posts.length - 1];
+        const norm = (s: string) => s.replace(/\s+/g, " ").trim();
+        if (after.posts.length > d.posts.length && last && norm(last.text) === norm(text))
+          return `Replied to bug report ${issue_id} (reply ${last.id}; the site answered HTTP ${r.status} but the reply is saved).`;
         throw new Error(`HTTP ${r.status}: ${oneLine(j?.message || r.body.replace(/<[^>]*>/g, " "), 300)}`);
       }),
   );
@@ -249,7 +268,7 @@ export function registerWebModTools(server: McpServer, web: WebClient, api: Nexu
         const url = "/Core/Libs/Common/Entities/ModBugIssue?DeleteIssue";
         if (dry_run) return dryRunReport("POST", `${WWW}${url}`, [["issue_id", String(issue_id)]], "XHR, application/x-www-form-urlencoded");
         const r = await web.postForm(url, "POST", { issue_id });
-        if (r.status === 200 && r.body.trim() === "1") return `Deleted bug report ${issue_id}.`;
+        if (r.status === 200 && isOne(r.body)) return `Deleted bug report ${issue_id}.`;
         throw new Error(`HTTP ${r.status}: ${oneLine(r.body.replace(/<[^>]*>/g, " "), 300)}`);
       }),
   );

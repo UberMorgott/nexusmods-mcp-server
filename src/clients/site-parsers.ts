@@ -63,7 +63,10 @@ export async function fetchAndParse({ kind, url, form }: ParseArgs): Promise<any
     f.querySelectorAll("input,textarea,select").forEach((el) => {
       const i = el as HTMLInputElement;
       const name = i.getAttribute("name");
-      if (!name || i.hasAttribute("disabled")) return;
+      // DOMParser runs with scripting off, so <noscript> content becomes real controls; in a
+      // JS browser it is inert text and never submitted (Invision's `<name>_noscript` editor
+      // twin: if sent, even empty, it overrides the rich editor field).
+      if (!name || i.hasAttribute("disabled") || el.closest("noscript")) return;
       const type = (i.getAttribute("type") || "").toLowerCase();
       if (["file", "submit", "button", "reset", "image"].includes(type)) return;
       if ((type === "checkbox" || type === "radio") && !i.hasAttribute("checked")) return;
@@ -232,6 +235,10 @@ export async function fetchAndParse({ kind, url, form }: ParseArgs): Promise<any
     const posts = Array.from(doc.querySelectorAll("li.comment[id^='bug-']")).map((li) => {
       const body = li.querySelector(".comment-content")?.cloneNode(true) as Element | undefined;
       body?.querySelectorAll("time, .comment-reply, script").forEach((x) => x.remove());
+      // Own posts carry inline "Edit post" controls inside the content block.
+      body?.querySelectorAll("a, button, li").forEach((x) => {
+        if ((x.textContent || "").trim() === "Edit post") x.remove();
+      });
       return {
         id: li.id.replace(/^bug-(issue|reply)-tile-/, ""),
         isReport: li.id.startsWith("bug-issue-tile-"),
