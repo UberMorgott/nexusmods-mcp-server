@@ -1,0 +1,50 @@
+{
+  "name": "nexusmods-mcp-server",
+  "version": "0.1.0",
+  "description": "MCP server for Nexus Mods — search mods, files, downloads, collections, tracking, endorsements, file uploads (v3), plus browser-session tools for forums and messages.",
+  "type": "module",
+  "main": "./build/index.js",
+  "bin": {
+    "nexusmods-mcp-server": "./build/index.js"
+  },
+  "files": [
+    "build",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "node build/index.js",
+    "dev": "tsx watch src/index.ts",
+    "setup": "tsx src/setup.ts",
+    "prepare": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "nexusmods",
+    "nexus-mods",
+    "modding",
+    "model-context-protocol"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "CC-BY-NC-4.0",
+  "author": "Morgott",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@rookie-rs/api": "^0.5.6",
+    "dotenv": "^18.0.3",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "optionalDependencies": {
+    "patchright": "^1.63.0"
+  }
+}

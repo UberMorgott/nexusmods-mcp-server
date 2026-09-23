@@ -1,0 +1,7 @@
+node_modules/
+build/
+.env
+.auth/
+.serena/
+.claude/
+downloads/
