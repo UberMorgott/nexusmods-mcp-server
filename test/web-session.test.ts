@@ -10,6 +10,7 @@ import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { WebClient, memberIdFromGid, LOGIN_TIMEOUT_MS } from "../src/clients/web-client.js";
+import { browserFromProgId } from "../src/utils/default-browser.js";
 
 const GID = Buffer.from("gid://api/MembersPreference/6541781").toString("base64");
 
@@ -57,6 +58,11 @@ function client(browser: ReturnType<typeof fakeBrowser>, cookies: unknown[] = []
   const web = new WebClient({ cookiesPath: path.join(dir, "cookies.json") } as any);
   (web as any).browser = browser;
   (web as any).extractCookies = async () => ({ cookies, browser: "fake" });
+  // never touch the real registry / default browser in tests
+  (web as any).detectDefaultBrowser = async () => null;
+  (web as any).openUrl = async () => {
+    throw new Error("openUrl not stubbed");
+  };
   return web;
 }
 
@@ -80,6 +86,8 @@ test("web_status json: account when logged in, cached until cookies change", asy
     account: { memberId: 6541781, name: "UberMorgott" },
     sessionSource: "manual",
     sessionBrowser: null,
+    loginVia: null,
+    loginBrowser: null,
   });
   await web.statusJson();
   assert.equal(b.calls.UserName, 1, "identity cached");
@@ -203,4 +211,103 @@ test("web_logout: clears everything, stops the sign-in poll, no re-extract at in
   await again.login();
   assert.equal(again.hasCookies(), true);
   assert.equal(JSON.parse(readFileSync(path.join(dir, "session.json"), "utf-8")).signedOut, false);
+});
+/** Default browser "chrome" whose store is readable; returns the session cookie after `after` polls. */
+function withDefaultBrowser(web: WebClient, opts: { readable?: boolean; after?: number } = {}) {
+  const st = { opened: [] as string[], polls: 0 };
+  (web as any).extractCookies = async () => ({ cookies: [], browser: "none", error: "none" });
+  (web as any).detectDefaultBrowser = async () => ({ progId: "ChromeHTML", browser: "chrome" });
+  (web as any).openUrl = async (u: string) => void st.opened.push(u);
+  (web as any).defaultBrowserPollMs = 10;
+  let probed = false;
+  (web as any).extractFrom = async (b: string) => {
+    if (opts.readable === false) return { browser: b, cookies: [], error: "app-bound encryption" };
+    if (!probed) return (probed = true), { browser: b, cookies: [] };
+    st.polls++;
+    return { browser: b, cookies: st.polls > (opts.after ?? 2) ? [COOKIE] : [] };
+  };
+  return st;
+}
+
+test("browserFromProgId: ProgId map", () => {
+  assert.equal(browserFromProgId("ChromeHTML"), "chrome");
+  assert.equal(browserFromProgId("MSEdgeHTM"), "edge");
+  assert.equal(browserFromProgId("FirefoxURL-308046B0AF4A39CB"), "firefox");
+  assert.equal(browserFromProgId("BraveHTML"), "brave");
+  assert.equal(browserFromProgId("OperaStable"), "opera");
+  assert.equal(browserFromProgId("OperaGXStable"), "opera-gx");
+  assert.equal(browserFromProgId("VivaldiHTM.ABC"), "vivaldi");
+  assert.equal(browserFromProgId("YandexHTML"), "yandex");
+  assert.equal(browserFromProgId("IE.HTTPS"), null);
+});
+
+test("web_login path 1: silent extraction → loginVia browser-extract, no default browser", async () => {
+  const web = client(fakeBrowser(), [COOKIE]);
+  let detected = 0;
+  (web as any).detectDefaultBrowser = async () => (detected++, null);
+  const r = await web.login();
+  assert.equal(r.loggedIn, true);
+  assert.equal(detected, 0);
+  assert.deepEqual(web.loginState(), { loginInProgress: false, loginVia: "browser-extract", loginBrowser: null });
+});
+
+test("web_login path 2: default browser readable → opens it, polls, captures as browser/<name>", async () => {
+  const b = fakeBrowser();
+  const web = client(b);
+  const st = withDefaultBrowser(web);
+  const r = await web.login();
+  assert.deepEqual({ ...r, detail: undefined }, { loggedIn: false, loginWindowOpened: false, detail: undefined });
+  assert.equal(st.opened.length, 1);
+  assert.match(st.opened[0], /users\.nexusmods\.com\/auth\/sign_in/);
+  assert.deepEqual(web.loginState(), { loginInProgress: true, loginVia: "default-browser", loginBrowser: "chrome" });
+  const s = await web.statusJson();
+  assert.equal(s.loginVia, "default-browser");
+  assert.equal(s.loginBrowser, "chrome");
+  assert.equal(s.loginInProgress, true);
+  await new Promise((r) => setTimeout(r, 200));
+  assert.equal(web.loginInProgress(), false);
+  assert.deepEqual(web.sessionSource(), { sessionSource: "browser", sessionBrowser: "chrome" });
+  assert.equal(b.closed, 0, "no own window involved");
+});
+
+test("web_login path 3: default browser unreadable → own sign-in window", async () => {
+  const b = fakeBrowser();
+  let openedLogin = 0;
+  (b as any).openLoginPage = async () => void openedLogin++;
+  const web = client(b);
+  const st = withDefaultBrowser(web, { readable: false });
+  const r = await web.login();
+  assert.equal(r.loginWindowOpened, true);
+  assert.equal(openedLogin, 1);
+  assert.equal(st.opened.length, 0, "default browser not opened");
+  assert.deepEqual(web.loginState(), { loginInProgress: true, loginVia: "window", loginBrowser: null });
+  assert.deepEqual(await web.cancelLogin(), { cancelled: true });
+});
+
+test("web_login_cancel: stops the own-window poll and closes it; idempotent", async () => {
+  const b = fakeBrowser();
+  const web = client(b);
+  await web.login();
+  assert.equal(web.loginInProgress(), true);
+  assert.deepEqual(await web.cancelLogin(), { cancelled: true });
+  assert.deepEqual(web.loginState(), { loginInProgress: false, loginVia: null, loginBrowser: null });
+  assert.equal(b.closed, 1);
+  assert.deepEqual(await web.cancelLogin(), { cancelled: false });
+  await new Promise((r) => setTimeout(r, 3500)); // stale poll tick captures nothing
+  assert.equal(web.hasCookies(), false);
+  assert.equal(b.closed, 1);
+});
+
+test("web_login_cancel: stops default-browser polling", async () => {
+  const b = fakeBrowser();
+  const web = client(b);
+  const st = withDefaultBrowser(web, { after: 1_000_000 });
+  await web.login();
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual(await web.cancelLogin(), { cancelled: true });
+  const polls = st.polls;
+  await new Promise((r) => setTimeout(r, 100));
+  assert.ok(st.polls <= polls + 1, "polling stopped");
+  assert.equal(web.hasCookies(), false);
+  assert.equal(b.closed, 0, "user's browser page is not ours to close");
 });

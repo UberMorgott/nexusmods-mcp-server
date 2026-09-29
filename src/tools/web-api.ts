@@ -77,13 +77,13 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
     {
       title: "Web Login",
       description:
-        "Get a nexusmods.com session: extracts cookies from installed browsers, else opens a visible sign-in window (session captured automatically, persists across runs). Re-run your action after signing in.",
+        "Get a nexusmods.com session: extracts cookies from installed browsers; else opens the sign-in page in your default browser (when its cookies are readable) or a visible sign-in window, and captures the session automatically (persists across runs). Re-run your action after signing in; web_login_cancel stops waiting.",
       inputSchema: { format: formatArg },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     ({ format }) =>
       format === "json"
-        ? wrapJson("web_login", async () => ({ ...(await web.login()), loginInProgress: web.loginInProgress(), ...web.sessionSource() }))
+        ? wrapJson("web_login", async () => ({ ...(await web.login()), ...web.loginState(), ...web.sessionSource() }))
         : wrap("web_login", () => web.autoExtractCookies()),
   );
 
@@ -97,6 +97,20 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
     },
     ({ cookies }) => wrap("web_set_cookies", async () => `Saved ${web.setCookiesFromString(cookies)} cookies.`),
   );
+  server.registerTool(
+    "web_login_cancel",
+    {
+      title: "Cancel Web Login",
+      description: "Stop waiting for a pending web_login sign-in (closes the server's own sign-in window).",
+      inputSchema: { format: formatArg },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    ({ format }) =>
+      format === "json"
+        ? wrapJson("web_login_cancel", () => web.cancelLogin())
+        : wrap("web_login_cancel", async () => ((await web.cancelLogin()).cancelled ? "Login cancelled." : "No login in progress.")),
+  );
+
   server.registerTool(
     "web_logout",
     {

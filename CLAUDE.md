@@ -1,7 +1,7 @@
 # nexusmods-mcp-server
 
 ## Overview
-MCP server for Nexus Mods (any game). 58 tools: v1 REST, v2 GraphQL, v3 uploads, plus a
+MCP server for Nexus Mods (any game). 59 tools: v1 REST, v2 GraphQL, v3 uploads, plus a
 browser-session web tier (mod comments, bug reports, forums + replies, private messages,
 collection comment writes, author tools: page edit, media, comment hiding).
 Sibling/architecture model: `E:\DEV\curseforge`.

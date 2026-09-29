@@ -7,6 +7,7 @@ import type { Config } from "../config.js";
 import type { CookieEntry } from "../utils/types.js";
 import { CookieExtractor } from "./cookie-extractor.js";
 import { BrowserClient, FORUMS_ORIGIN, WWW_ORIGIN } from "./browser-client.js";
+import { detectDefaultBrowser, openInDefaultBrowser } from "../utils/default-browser.js";
 import { fetchAndParse, submitRequest, type ParseKind, type SubmitArgs } from "./site-parsers.js";
 
 function originOf(url: string): string {
@@ -37,6 +38,9 @@ interface SessionMeta {
   signedOut: boolean;
 }
 
+/** Which web_login path signs in: silent extraction, the user's default browser, or the own window. */
+export type LoginVia = "browser-extract" | "default-browser" | "window";
+
 export interface LoginOutcome {
   loggedIn: boolean;
   /** This call opened a visible sign-in window. */
@@ -64,8 +68,18 @@ export class WebClient {
   private meta: SessionMeta = { source: null, browser: null, signedOut: false };
   /** Logged-in account, cached until the cookies change. */
   private account: Account | null = null;
-  /** Silent browser-cookie extraction (replaced in tests). */
+  /** How the current / last web_login is signing in; null = none since start, cancel or logout. */
+  private loginVia: LoginVia | null = null;
+  /** Default browser the sign-in page was opened in (loginVia "default-browser"). */
+  private loginBrowser: string | null = null;
+  // Injection points (replaced in tests).
+  /** Silent extraction: first installed browser with nexusmods.com cookies. */
   protected extractCookies = () => new CookieExtractor().extractCookies();
+  /** Cookies of one browser; `error` = store unreadable. */
+  protected extractFrom = (browser: string) => new CookieExtractor().extractFrom(browser);
+  protected detectDefaultBrowser = () => detectDefaultBrowser();
+  protected openUrl = (url: string) => openInDefaultBrowser(url);
+  protected defaultBrowserPollMs = 4000;
 
   constructor(private config: Config) {
     this.loadCookies();
@@ -88,7 +102,7 @@ export class WebClient {
     return this.cookies.length > 0;
   }
 
-  /** True while a visible sign-in window from web_login is open and being polled. */
+  /** True while web_login is polling for a sign-in (own window or default browser). */
   loginInProgress(): boolean {
     return this.loginPolling;
   }
@@ -98,7 +112,7 @@ export class WebClient {
       const result = await this.extractCookies();
       if (result.cookies.length > 0 && !this.meta.signedOut && !this.hasCookies()) {
         this.applyCookies(result.cookies, "browser", result.browser);
-        console.error(`[web-client] Extracted ${result.cookies.length} cookies from ${result.browser}`);
+        console.error(`[login] startup: extracted ${result.cookies.length} cookies from ${result.browser}; session captured: source=browser browser=${result.browser}`);
       }
     } catch (e) {
       console.error(`[web-client] Background cookie extraction failed: ${e instanceof Error ? e.message : e}`);
@@ -153,8 +167,8 @@ export class WebClient {
    *  file, live browser profile, account cache) and stay signed out across restarts —
    *  no silent browser extraction until the next web_login / web_set_cookies. */
   async logout(): Promise<{ loggedOut: true; cookiesStored: false }> {
-    this.loginGen++;
-    this.loginPolling = false;
+    this.stopLogin();
+    console.error("[login] logged out");
     this.cookies = [];
     this.account = null;
     rmSync(this.config.cookiesPath, { force: true });
@@ -232,6 +246,8 @@ export class WebClient {
       detail: who.detail,
       account: null,
       ...this.sessionSource(),
+      loginVia: this.loginVia,
+      loginBrowser: this.loginBrowser,
     };
     if (who.loggedIn) {
       try {
@@ -247,33 +263,122 @@ export class WebClient {
     return (await this.login()).detail;
   }
 
-  /** Silent extraction from installed browsers first; else a visible sign-in window. */
+  /** web_login, in this order: (1) silent extraction from installed browsers → done if
+   *  logged in; (2) the user's default browser, when its cookie store is readable: open the
+   *  sign-in page there and poll its cookies; (3) otherwise the server's own sign-in window.
+   *  Steps 2/3 return immediately; the poll runs in the background (web_login_cancel stops it). */
   async login(): Promise<LoginOutcome> {
+    const no = (detail: string): LoginOutcome => ({ loggedIn: false, loginWindowOpened: false, detail });
+    if (this.loginPolling)
+      return no(
+        this.loginVia === "default-browser"
+          ? `Sign-in is open in your browser (${this.loginBrowser}) — finish signing in there; the session is captured automatically.`
+          : "A login window is already open — finish signing in there; the session is captured automatically.",
+      );
+    console.error("[login] step 1: silent extraction from installed browsers");
     const result = await this.extractCookies();
     if (result.cookies.length > 0) {
       this.applyCookies(result.cookies, "browser", result.browser);
       const who = await this.whoAmI().catch(() => ({ loggedIn: false, detail: "check failed" }));
-      if (who.loggedIn)
+      console.error(`[login] extracted ${result.cookies.length} cookies from ${result.browser}, logged in: ${who.loggedIn ? "yes" : "no"}`);
+      if (who.loggedIn) {
+        this.loginVia = "browser-extract";
+        this.loginBrowser = null;
+        console.error(`[login] session captured: source=browser browser=${result.browser}`);
         return { loggedIn: true, loginWindowOpened: false, detail: `Extracted ${result.cookies.length} cookies from ${result.browser}; logged in.` };
-    }
-    // Nothing usable (e.g. Chrome 127+ App-Bound Encryption) → interactive login.
+      }
+    } else console.error(`[login] extraction: no nexusmods.com cookies${result.error ? ` (${result.error})` : ""}`);
+
+    const viaDefault = await this.defaultBrowserLogin();
+    if (viaDefault) return viaDefault;
     return await this.browserLogin();
   }
 
-  /** Opens the Nexus sign-in page VISIBLY and returns immediately; a background poll
+  /** Step 2: sign in through the user's default browser if its cookie store can be read
+   *  (not e.g. Chrome 127+ App-Bound Encryption). null → fall through to the own window. */
+  private async defaultBrowserLogin(): Promise<LoginOutcome | null> {
+    const def = await this.detectDefaultBrowser().catch(() => null);
+    if (!def) {
+      console.error("[login] step 2: default browser unknown (not Windows or no https handler) — skipped");
+      return null;
+    }
+    const name = def.browser;
+    if (!name) {
+      console.error(`[login] step 2: default browser ProgId ${def.progId} → unknown — skipped`);
+      return null;
+    }
+    const probe = await this.extractFrom(name).catch((e) => ({ browser: name, cookies: [], error: String(e) }));
+    console.error(`[login] step 2: default browser ProgId ${def.progId} → ${name}, readable: ${probe.error ? `no (${probe.error})` : "yes"}`);
+    if (probe.error) return null;
+    try {
+      await this.openUrl(LOGIN_URL);
+    } catch (e) {
+      console.error(`[login] could not open ${name}: ${e instanceof Error ? e.message : e}`);
+      return null;
+    }
+    console.error(`[login] opened sign-in page in default browser ${name}; polling its cookies`);
+    const gen = this.beginPolling("default-browser", name);
+    void this.pollDefaultBrowser(name, gen).finally(() => {
+      if (gen === this.loginGen) this.loginPolling = false;
+    });
+    return {
+      loggedIn: false,
+      loginWindowOpened: false,
+      detail: `The Nexus Mods sign-in page has opened in your browser (${name}). Sign in there — the session is captured automatically; then re-run your action.`,
+    };
+  }
+
+  private beginPolling(via: LoginVia, browser: string | null): number {
+    this.loginPolling = true;
+    this.loginVia = via;
+    this.loginBrowser = browser;
+    return this.loginGen;
+  }
+
+  private async pollDefaultBrowser(name: string, gen: number): Promise<boolean> {
+    const start = Date.now();
+    let last = "";
+    try {
+      while (Date.now() - start < LOGIN_TIMEOUT_MS) {
+        await new Promise((r) => setTimeout(r, this.defaultBrowserPollMs));
+        if (gen !== this.loginGen) return false;
+        const r = await this.extractFrom(name);
+        if (gen !== this.loginGen) return false;
+        if (r.error || r.cookies.length === 0) continue;
+        const key = r.cookies.map((c) => `${c.name}=${c.value}`).sort().join(";");
+        if (key === last) continue; // same cookies as last check → still not signed in
+        last = key;
+        this.browser.setCookies(r.cookies);
+        const who = await this.whoAmI().catch(() => ({ loggedIn: false }));
+        if (gen !== this.loginGen) return false;
+        console.error(`[login] ${name}: ${r.cookies.length} cookies, logged in: ${who.loggedIn ? "yes" : "no"}`);
+        if (who.loggedIn) {
+          this.applyCookies(r.cookies, "browser", name);
+          console.error(`[login] session captured: source=browser browser=${name}`);
+          return true;
+        }
+      }
+      console.error(`[login] ${name}: sign-in wait timed out`);
+    } catch (e) {
+      console.error(`[login] ${name}: polling failed: ${e instanceof Error ? e.message : e}`);
+    }
+    return false;
+  }
+
+  /** Step 3: opens the Nexus sign-in page VISIBLY and returns immediately; a background poll
    *  captures the session once the user signs in (persistent profile keeps it). */
   private async browserLogin(): Promise<LoginOutcome> {
     const no = (detail: string): LoginOutcome => ({ loggedIn: false, loginWindowOpened: false, detail });
-    if (this.loginPolling) return no("A login window is already open — finish signing in there; the session is captured automatically.");
     try {
       await this.browser.openLoginPage(LOGIN_URL);
     } catch (e) {
+      console.error(`[login] could not open the sign-in window: ${e instanceof Error ? e.message : e}`);
       return no(`Could not open the login browser: ${e instanceof Error ? e.message : e} (run: npx patchright install chromium)`);
     }
-    this.loginPolling = true;
-    const gen = this.loginGen;
+    console.error("[login] step 3: opened own sign-in window");
+    const gen = this.beginPolling("window", null);
     void this.pollForLogin(LOGIN_TIMEOUT_MS).finally(() => {
-      if (gen !== this.loginGen) return; // logout already stopped it and closed the window
+      if (gen !== this.loginGen) return; // cancel/logout already stopped it and closed the window
       this.loginPolling = false;
       void this.browser.close();
     });
@@ -287,30 +392,53 @@ export class WebClient {
     };
   }
 
+  /** web_login_cancel: stop a running sign-in poll; closes the own sign-in window (a page
+   *  opened in the user's browser stays open). */
+  async cancelLogin(): Promise<{ cancelled: boolean }> {
+    const was = this.loginPolling;
+    const via = this.loginVia;
+    this.stopLogin();
+    if (!was) return { cancelled: false };
+    console.error(`[login] cancelled (${via})`);
+    if (via === "window") await this.browser.close();
+    return { cancelled: true };
+  }
+
+  private stopLogin(): void {
+    this.loginGen++;
+    this.loginPolling = false;
+    this.loginVia = null;
+    this.loginBrowser = null;
+  }
+
+  /** Login progress fields for web_login / web_status json. */
+  loginState(): { loginInProgress: boolean; loginVia: LoginVia | null; loginBrowser: string | null } {
+    return { loginInProgress: this.loginPolling, loginVia: this.loginVia, loginBrowser: this.loginBrowser };
+  }
+
   private async pollForLogin(timeoutMs: number): Promise<boolean> {
     const start = Date.now();
     const gen = this.loginGen;
     try {
       while (Date.now() - start < timeoutMs) {
         await new Promise((r) => setTimeout(r, 3000));
-        if (gen !== this.loginGen) return false; // web_logout
+        if (gen !== this.loginGen) return false; // cancel / logout
         const who = await this.whoAmI().catch(() => ({ loggedIn: false }));
         if (gen !== this.loginGen) return false;
         if (who.loggedIn) {
           const cookies = await this.browser.getCookies();
           if (gen !== this.loginGen) return false;
           this.applyCookies(cookies, "window");
-          console.error(`[web-client] Login detected — ${cookies.length} cookies saved.`);
+          console.error(`[login] session captured: source=window (${cookies.length} cookies)`);
           return true;
         }
       }
-      console.error("[web-client] Login wait timed out.");
+      console.error("[login] sign-in window: wait timed out");
     } catch (e) {
-      console.error(`[web-client] Login window lost: ${e instanceof Error ? e.message : e}`);
+      console.error(`[login] sign-in window lost: ${e instanceof Error ? e.message : e}`);
     }
     return false;
   }
-
   /** Blocking interactive login for the setup wizard (NOT for MCP requests). */
   async loginInteractive(timeoutMs = 180_000): Promise<boolean> {
     await this.browser.openLoginPage(LOGIN_URL);
