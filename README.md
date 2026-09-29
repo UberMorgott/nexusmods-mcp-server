@@ -87,7 +87,11 @@ the site, not raw).
 Errors (`isError: true`): `structuredContent = {error:{code, message}}`, `code` ∈
 `not_logged_in` (no session / no form token), `cloudflare`, `not_found` (unknown game,
 deleted bug), `disabled` (comments or bug reports off for the mod), `rate_limited`,
-`invalid`, `error`. Writes are never retried; GET / GraphQL reads back off once on
+`invalid`, `outcome_unknown` (a write request was sent but failed without a 4xx
+refusal — timeout, 5xx, odd answer — and the read-back did not find it: it may have been
+saved, read back before retrying), `error`. `search_mods` also filters by `uploader`
+(exact account name) or `uploader_id`, which identify an account; `author` is free text.
+Writes are never retried; GET / GraphQL reads back off once on
 429/503 (`Retry-After` ≤ 30 s, else 2 s).
 
 ## Rules

@@ -18,7 +18,7 @@ import { resolveGameId } from "./graphql-api.js";
 import { dryRunReport } from "./web-api.js";
 import { success, error, errMsg } from "../utils/types.js";
 import { fmtDate, oneLine, truncate } from "../utils/helpers.js";
-import { formatArg, jsonResult, jsonError, CodedError } from "../utils/structured.js";
+import { formatArg, jsonResult, jsonError, CodedError, afterSendError } from "../utils/structured.js";
 import { modBugsJson, modBugJson, findPosted } from "./json-shapes.js";
 
 const WWW = WWW_ORIGIN;
@@ -256,7 +256,12 @@ export function registerWebModTools(server: McpServer, web: WebClient, api: Nexu
             const base = { dryRun: false, parentId: String(issue_id) };
             if (dry_run)
               return { ...base, posted: false, dryRun: true, id: null, verified: false, httpStatus: null, request: dryRunReport("POST", `${WWW}${url}`, Object.entries(fields), "XHR, application/x-www-form-urlencoded") };
-            const r = await web.postForm(url, "POST", fields);
+            let r: { status: number; body: string };
+            try {
+              r = await web.postForm(url, "POST", fields);
+            } catch (e) {
+              throw afterSendError(null, `POST ${url}: ${errMsg(e)}`);
+            }
             let j: any = null;
             try {
               j = JSON.parse(r.body);
@@ -268,7 +273,10 @@ export function registerWebModTools(server: McpServer, web: WebClient, api: Nexu
             const after = await list().catch(() => null);
             const id = after ? findPosted(after.posts, text, before) : null;
             if (id || (r.status === 200 && j?.status === true)) return { ...base, posted: true, id, verified: id !== null, httpStatus: r.status };
-            throw new Error(`HTTP ${r.status}: ${oneLine(j?.message || r.body.replace(/<[^>]*>/g, " "), 300)}`);
+            // Not found by the read-back: a 4xx or an explicit {status:false} is a refusal,
+            // anything else may still have saved.
+            if (r.status === 200 && j?.status === false) throw new Error(`refused: ${oneLine(j?.message || "status false", 300)}`);
+            throw afterSendError(r.status,`HTTP ${r.status}: ${oneLine(j?.message || r.body.replace(/<[^>]*>/g, " "), 300)}`);
           })
         : wrap("reply_mod_bug", async () => {
         const d = await web.parse("modBugReplies", `${WWW}/Core/Libs/Common/Widgets/ModBugReplyList`, { issue_id: String(issue_id) });

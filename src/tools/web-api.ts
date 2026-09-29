@@ -12,7 +12,7 @@ import type { NexusApiClient } from "../clients/nexus-api.js";
 import { resolveGameId } from "./graphql-api.js";
 import { success, error, errMsg } from "../utils/types.js";
 import { fmtDate, oneLine, truncate } from "../utils/helpers.js";
-import { formatArg, jsonResult, jsonError, CodedError } from "../utils/structured.js";
+import { formatArg, jsonResult, jsonError, CodedError, afterSendError, refusedStatus } from "../utils/structured.js";
 import { modCommentsJson, findPosted } from "./json-shapes.js";
 
 const WWW = "https://www.nexusmods.com";
@@ -173,23 +173,30 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
       format === "json"
         ? wrapJson("post_mod_comment", async () => {
             const { gameId, threadId, token, page1 } = await commentToken(g, mod_id);
-            const r = await web.postForm("/mod/comment", "POST", {
-              game_id: gameId,
-              object_id: mod_id,
-              thread_id: threadId,
-              post: encodeURIComponent(text),
-              use_emo: 0,
-              parent_id: parent_id ?? 0,
-              _token: token,
-            });
-            if (!(r.status === 200 && r.body.trim() === "1")) throw new Error(`HTTP ${r.status}: ${oneLine(r.body.replace(/<[^>]*>/g, " "), 300)}`);
+            let r: { status: number; body: string };
+            try {
+              r = await web.postForm("/mod/comment", "POST", {
+                game_id: gameId,
+                object_id: mod_id,
+                thread_id: threadId,
+                post: encodeURIComponent(text),
+                use_emo: 0,
+                parent_id: parent_id ?? 0,
+                _token: token,
+              });
+            } catch (e) {
+              throw afterSendError(null, `POST /mod/comment: ${errMsg(e)}`);
+            }
+            const ok = r.status === 200 && r.body.trim() === "1";
             // A new post can take seconds to appear in the listing: look again before giving up.
+            // A failed answer is read back too: the site may save the post and still answer 5xx.
             let newId: string | null = null;
-            for (const wait of READBACK_WAITS_MS) {
+            for (const wait of ok || !refusedStatus(r.status) ? READBACK_WAITS_MS : []) {
               if (wait) await new Promise((res) => setTimeout(res, wait));
               newId = await readBackComment(g, mod_id, gameId, threadId, text, parent_id, flatIds(page1)).catch(() => null);
               if (newId) break;
             }
+            if (!ok && !newId) throw afterSendError(r.status, `HTTP ${r.status}: ${oneLine(r.body.replace(/<[^>]*>/g, " "), 300)}`);
             return { posted: true, dryRun: false, id: newId, parentId: parent_id ? String(parent_id) : null, verified: newId !== null, httpStatus: r.status };
           })
         : wrap("post_mod_comment", async () => {

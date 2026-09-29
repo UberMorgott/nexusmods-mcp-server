@@ -52,7 +52,9 @@ export function registerGraphqlTools(server: McpServer, api: NexusApiClient): vo
       inputSchema: {
         query: z.string().optional().describe("Text to find in the mod name"),
         game: game.optional(),
-        author: z.string().optional().describe("Exact author name"),
+        author: z.string().optional().describe("Exact author name (the mod's free-text author field: anyone can set it)"),
+        uploader: z.string().optional().describe("Exact uploader account name (unique per account)"),
+        uploader_id: z.number().int().positive().optional().describe("Uploader member id (unique per account)"),
         sort: z.enum(SORT_FIELDS).optional().default("relevance"),
         direction: z.enum(["DESC", "ASC"]).optional().default("DESC"),
         count: z.number().int().min(1).max(50).optional().default(10),
@@ -62,12 +64,14 @@ export function registerGraphqlTools(server: McpServer, api: NexusApiClient): vo
       },
       annotations: READ,
     },
-    ({ query, game: g, author, sort, direction, count, offset, include_adult, format }) => {
+    ({ query, game: g, author, uploader, uploader_id, sort, direction, count, offset, include_adult, format }) => {
       const run = (fields: string) => {
         const filter: Record<string, unknown> = {};
         if (query) filter.name = [{ value: query, op: "WILDCARD" }];
         if (g) filter.gameDomainName = [{ value: g, op: "EQUALS" }];
         if (author) filter.author = [{ value: author, op: "EQUALS" }];
+        if (uploader) filter.uploader = [{ value: uploader, op: "EQUALS" }];
+        if (uploader_id) filter.uploaderId = [{ value: String(uploader_id), op: "EQUALS" }];
         if (!include_adult) filter.adultContent = [{ value: false, op: "EQUALS" }];
         const sortKey = sort === "name" ? "name" : sort;
         return api.graphql(

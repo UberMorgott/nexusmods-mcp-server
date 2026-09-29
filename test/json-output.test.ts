@@ -24,7 +24,7 @@ import {
   PostResultSchema,
   StatusResultSchema,
 } from "../src/tools/json-shapes.js";
-import { jsonResult, jsonError, errorCode, CodedError, isoUtc, localStamp } from "../src/utils/structured.js";
+import { jsonResult, jsonError, errorCode, CodedError, isoUtc, localStamp, afterSendError, refusedStatus } from "../src/utils/structured.js";
 
 const fixture = (n: string) => readFileSync(new URL(`./fixtures/${n}`, import.meta.url), "utf8");
 
@@ -155,6 +155,19 @@ test("json result / error envelope and codes", () => {
   assert.equal(errorCode(new Error("boom")), "error");
   PostResultSchema.parse({ posted: true, dryRun: false, id: "1", parentId: null, verified: true, httpStatus: 200 });
   StatusResultSchema.parse({ loggedIn: false, loginInProgress: false, cookiesStored: false, detail: "UNAUTHORIZED" });
+});
+
+test("write errors after the request was sent: 4xx refused, else outcome_unknown", () => {
+  assert.equal(errorCode(afterSendError(null, "POST /mod/comment: Target page closed")), "outcome_unknown");
+  assert.equal(errorCode(afterSendError(500, "HTTP 500: server error")), "outcome_unknown");
+  assert.equal(errorCode(afterSendError(502, "HTTP 502: not found upstream")), "outcome_unknown");
+  assert.equal(errorCode(afterSendError(200, "HTTP 200: odd body")), "outcome_unknown");
+  assert.equal(errorCode(afterSendError(408, "HTTP 408: timeout")), "outcome_unknown");
+  assert.equal(errorCode(afterSendError(401, "HTTP 401: nope")), "not_logged_in");
+  assert.equal(errorCode(afterSendError(429, "HTTP 429: slow down")), "rate_limited");
+  assert.equal(errorCode(afterSendError(422, "HTTP 422: bad")), "error");
+  assert.equal(refusedStatus(403), true);
+  assert.equal(refusedStatus(503), false);
 });
 
 test("read-back finds the new post id, ignoring older identical text", () => {
