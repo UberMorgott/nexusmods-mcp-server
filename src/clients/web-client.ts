@@ -17,11 +17,40 @@ function originOf(url: string): string {
  *  (window.env.NEXT_PUBLIC_API_PUBLIC_GRAPHQL_URI). */
 const API_ROUTER = "https://api-router.nexusmods.com/graphql";
 const LOGIN_URL = "https://users.nexusmods.com/auth/sign_in?redirect_url=https%3A%2F%2Fwww.nexusmods.com%2F";
+/** Sign-in window poll: 2FA / Google sign-in can take several minutes. */
+export const LOGIN_TIMEOUT_MS = 600_000;
+
+export interface Account {
+  memberId: number;
+  name: string;
+}
+
+export interface LoginOutcome {
+  loggedIn: boolean;
+  /** This call opened a visible sign-in window. */
+  loginWindowOpened: boolean;
+  detail: string;
+}
+
+/** `preferences.id` is a base64 global id "gid://api/MembersPreference/<memberId>" —
+ *  the only "current user" handle the api-router exposes (no viewer/me query). The forum
+ *  (Invision) member id is a different number and must not be used here. */
+export function memberIdFromGid(id: unknown): number | null {
+  if (typeof id !== "string" || !id) return null;
+  const raw = id.startsWith("gid://") ? id : Buffer.from(id, "base64").toString("utf8");
+  const m = /^gid:\/\/[^/]+\/[^/]+\/(\d+)$/.exec(raw);
+  const n = m ? Number(m[1]) : NaN;
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
 
 export class WebClient {
   private cookies: CookieEntry[] = [];
   private browser = new BrowserClient();
   private loginPolling = false;
+  /** Logged-in account, cached until the cookies change. */
+  private account: Account | null = null;
+  /** Silent browser-cookie extraction (replaced in tests). */
+  protected extractCookies = () => new CookieExtractor().extractCookies();
 
   constructor(private config: Config) {
     this.loadCookies();
@@ -71,6 +100,7 @@ export class WebClient {
 
   private applyCookies(cookies: CookieEntry[]): void {
     this.cookies = cookies;
+    this.account = null;
     this.browser.setCookies(cookies);
     this.saveCookies();
   }
@@ -109,12 +139,61 @@ export class WebClient {
     return { loggedIn: false, detail: json?.errors?.[0]?.message || `HTTP ${res.status}` };
   }
 
+  /** The logged-in account (member id + name), cached until the cookies change.
+   *  Throws when not logged in or the lookup fails. */
+  async getAccount(): Promise<Account> {
+    if (this.account) return this.account;
+    const cookies = this.cookies;
+    const p = await this.sessionGraphql<{ preferences: { id: string } | null }>(
+      "Preferences",
+      "query Preferences { preferences { id } }",
+      {},
+    );
+    const memberId = memberIdFromGid(p?.preferences?.id);
+    if (!memberId) throw new Error("account id not found in preferences");
+    const u = await this.sessionGraphql<{ user: { memberId: number; name: string } | null }>(
+      "UserName",
+      "query UserName($id: Int!) { user(id: $id) { memberId name } }",
+      { id: memberId },
+    );
+    if (!u?.user?.name) throw new Error(`no user ${memberId}`);
+    const account = { memberId: Number(u.user.memberId) || memberId, name: u.user.name };
+    if (this.cookies === cookies) this.account = account; // cookies swapped mid-lookup → don't cache
+    return account;
+  }
+
+  /** web_status json: session check plus the account identity when logged in. */
+  async statusJson(): Promise<Record<string, unknown>> {
+    const who = await this.whoAmI();
+    const out: Record<string, unknown> = {
+      loggedIn: who.loggedIn,
+      loginInProgress: this.loginInProgress(),
+      cookiesStored: this.hasCookies(),
+      detail: who.detail,
+      account: null,
+    };
+    if (who.loggedIn) {
+      try {
+        out.account = await this.getAccount();
+      } catch (e) {
+        out.accountError = e instanceof Error ? e.message : String(e);
+      }
+    }
+    return out;
+  }
+
   async autoExtractCookies(): Promise<string> {
-    const result = await new CookieExtractor().extractCookies();
+    return (await this.login()).detail;
+  }
+
+  /** Silent extraction from installed browsers first; else a visible sign-in window. */
+  async login(): Promise<LoginOutcome> {
+    const result = await this.extractCookies();
     if (result.cookies.length > 0) {
       this.applyCookies(result.cookies);
       const who = await this.whoAmI().catch(() => ({ loggedIn: false, detail: "check failed" }));
-      if (who.loggedIn) return `Extracted ${result.cookies.length} cookies from ${result.browser}; logged in.`;
+      if (who.loggedIn)
+        return { loggedIn: true, loginWindowOpened: false, detail: `Extracted ${result.cookies.length} cookies from ${result.browser}; logged in.` };
     }
     // Nothing usable (e.g. Chrome 127+ App-Bound Encryption) → interactive login.
     return await this.browserLogin();
@@ -122,23 +201,27 @@ export class WebClient {
 
   /** Opens the Nexus sign-in page VISIBLY and returns immediately; a background poll
    *  captures the session once the user signs in (persistent profile keeps it). */
-  private async browserLogin(): Promise<string> {
-    if (this.loginPolling) return "A login window is already open — finish signing in there; the session is captured automatically.";
+  private async browserLogin(): Promise<LoginOutcome> {
+    const no = (detail: string): LoginOutcome => ({ loggedIn: false, loginWindowOpened: false, detail });
+    if (this.loginPolling) return no("A login window is already open — finish signing in there; the session is captured automatically.");
     try {
       await this.browser.openLoginPage(LOGIN_URL);
     } catch (e) {
-      return `Could not open the login browser: ${e instanceof Error ? e.message : e} (run: npx patchright install chromium)`;
+      return no(`Could not open the login browser: ${e instanceof Error ? e.message : e} (run: npx patchright install chromium)`);
     }
     this.loginPolling = true;
-    void this.pollForLogin(120_000).finally(() => {
+    void this.pollForLogin(LOGIN_TIMEOUT_MS).finally(() => {
       this.loginPolling = false;
       void this.browser.close();
     });
-    return (
-      "A Nexus Mods login window has opened. Sign in there — the session is captured automatically " +
-      "and persists for future runs; then re-run your action. Alternative: web_set_cookies with the " +
-      "Cookie header from a browser where you're logged in to nexusmods.com."
-    );
+    return {
+      loggedIn: false,
+      loginWindowOpened: true,
+      detail:
+        "A Nexus Mods login window has opened. Sign in there — the session is captured automatically " +
+        "and persists for future runs; then re-run your action. Alternative: web_set_cookies with the " +
+        "Cookie header from a browser where you're logged in to nexusmods.com.",
+    };
   }
 
   private async pollForLogin(timeoutMs: number): Promise<boolean> {

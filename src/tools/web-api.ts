@@ -64,10 +64,7 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
     },
     ({ format }) =>
       format === "json"
-        ? wrapJson("web_status", async () => {
-            const who = await web.whoAmI();
-            return { loggedIn: who.loggedIn, loginInProgress: web.loginInProgress(), cookiesStored: web.hasCookies(), detail: who.detail };
-          })
+        ? wrapJson("web_status", () => web.statusJson())
         : wrap("web_status", async () => {
         const login = web.loginInProgress() ? "Login in progress (sign-in window open). " : "";
         const who = await web.whoAmI();
@@ -81,10 +78,13 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
       title: "Web Login",
       description:
         "Get a nexusmods.com session: extracts cookies from installed browsers, else opens a visible sign-in window (session captured automatically, persists across runs). Re-run your action after signing in.",
-      inputSchema: {},
+      inputSchema: { format: formatArg },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
-    () => wrap("web_login", () => web.autoExtractCookies()),
+    ({ format }) =>
+      format === "json"
+        ? wrapJson("web_login", async () => ({ ...(await web.login()), loginInProgress: web.loginInProgress() }))
+        : wrap("web_login", () => web.autoExtractCookies()),
   );
 
   server.registerTool(

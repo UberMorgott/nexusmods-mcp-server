@@ -63,7 +63,7 @@ site changes. `NEXUS_BROWSER_VISIBLE=1` shows the browser window for debugging.
 
 For programs (e.g. IssueWatcher) these tools take `format: "json"` (default `"text"`,
 unchanged): `search_mods`, `get_mod_comments`, `get_mod_bugs`, `get_mod_bug`,
-`post_mod_comment`, `reply_mod_bug`, `web_status`. The result is the full, untruncated
+`post_mod_comment`, `reply_mod_bug`, `web_status`, `web_login`. The result is the full, untruncated
 object as MCP `structuredContent`, and the same JSON in the text block. No `outputSchema`
 is declared (the SDK would then demand structuredContent in text mode too); the zod
 schemas live in `src/tools/json-shapes.ts` and are checked by `npm test` against saved
@@ -82,7 +82,8 @@ the site, not raw).
 | `get_mod_bug` | `{issueId, canReply, report:{id, parentId:null, author, authorId, createdAt:null, createdAtLocal, body}, replies:[{… parentId: issueId}]}` — the widget shows only a site-local time without offset (`"YYYY-MM-DDTHH:MM"`, the logged-in profile's zone), so `createdAt` is null; use `lastPostAt` from `get_mod_bugs` for UTC |
 | `post_mod_comment` | `{posted:true, dryRun:false, id, parentId, verified, httpStatus}` — the site answers `1` without an id: `id` is found by reading the thread back (same body, not seen before); `verified:false, id:null` if not found |
 | `reply_mod_bug` | same shape; always read back (the endpoint may answer HTTP 500 yet save); `dry_run:true` → `{posted:false, dryRun:true, id:null, request}` |
-| `web_status` | `{loggedIn, loginInProgress, cookiesStored, detail}` |
+| `web_status` | `{loggedIn, loginInProgress, cookiesStored, detail, account:{memberId, name} \| null, accountError?}` — `account` is the logged-in Nexus account (member id from the api-router `preferences` global id, name from `user(id)`), cached until the cookies change; lookup failure → `account:null` + `accountError`, `loggedIn` unchanged |
+| `web_login` | `{loggedIn, loginWindowOpened, detail, loginInProgress}` — silent browser-cookie extraction first, else a visible sign-in window (`loginWindowOpened:true`), polled up to 10 min and closed after capture/timeout; poll `web_status` until `loggedIn` |
 
 Errors (`isError: true`): `structuredContent = {error:{code, message}}`, `code` ∈
 `not_logged_in` (no session / no form token), `cloudflare`, `not_found` (unknown game,
