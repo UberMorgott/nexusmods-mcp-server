@@ -140,6 +140,9 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
 
   /** post_mod_comment answers "1" without an id: find the new comment by reading back
    *  (top-level: page 1; reply: the parent's thread, first 5 pages). */
+  /** Pauses before each read-back attempt after a post (live: the listing lags the post). */
+  const READBACK_WAITS_MS = [0, 3000, 6000];
+
   async function readBackComment(g: string, id: number, gameId: number, threadId: number, text: string, parentId: number | undefined, before: Set<string>): Promise<string | null> {
     const first = await web.parse("modComments", widgetUrl(gameId, id, threadId, 1));
     if (!parentId) return findPosted(first.comments, text, before);
@@ -180,7 +183,13 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
               _token: token,
             });
             if (!(r.status === 200 && r.body.trim() === "1")) throw new Error(`HTTP ${r.status}: ${oneLine(r.body.replace(/<[^>]*>/g, " "), 300)}`);
-            const newId = await readBackComment(g, mod_id, gameId, threadId, text, parent_id, flatIds(page1)).catch(() => null);
+            // A new post can take seconds to appear in the listing: look again before giving up.
+            let newId: string | null = null;
+            for (const wait of READBACK_WAITS_MS) {
+              if (wait) await new Promise((res) => setTimeout(res, wait));
+              newId = await readBackComment(g, mod_id, gameId, threadId, text, parent_id, flatIds(page1)).catch(() => null);
+              if (newId) break;
+            }
             return { posted: true, dryRun: false, id: newId, parentId: parent_id ? String(parent_id) : null, verified: newId !== null, httpStatus: r.status };
           })
         : wrap("post_mod_comment", async () => {
