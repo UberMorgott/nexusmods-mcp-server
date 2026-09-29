@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Morgott
 // Licensed under CC BY-NC 4.0 — see LICENSE.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import type { Config } from "../config.js";
 import type { CookieEntry } from "../utils/types.js";
@@ -23,6 +23,18 @@ export const LOGIN_TIMEOUT_MS = 600_000;
 export interface Account {
   memberId: number;
   name: string;
+}
+
+/** Where the stored session came from: extracted from an installed browser, captured
+ *  from the visible sign-in window, or pasted via web_set_cookies. null = unknown. */
+export type SessionSource = "browser" | "window" | "manual";
+
+/** Sidecar next to the cookies file (`session.json`); survives restarts. */
+interface SessionMeta {
+  source: SessionSource | null;
+  browser: string | null;
+  /** web_logout ran: no silent browser extraction at startup until the next explicit login. */
+  signedOut: boolean;
 }
 
 export interface LoginOutcome {
@@ -47,6 +59,9 @@ export class WebClient {
   private cookies: CookieEntry[] = [];
   private browser = new BrowserClient();
   private loginPolling = false;
+  /** Bumped by logout: a running sign-in poll with an older value stops. */
+  private loginGen = 0;
+  private meta: SessionMeta = { source: null, browser: null, signedOut: false };
   /** Logged-in account, cached until the cookies change. */
   private account: Account | null = null;
   /** Silent browser-cookie extraction (replaced in tests). */
@@ -54,13 +69,19 @@ export class WebClient {
 
   constructor(private config: Config) {
     this.loadCookies();
+    this.loadMeta();
+  }
+
+  private get metaPath(): string {
+    return path.join(path.dirname(this.config.cookiesPath), "session.json");
   }
 
   /** Non-blocking startup: push on-disk cookies to the browser and, if none, try a SILENT
    *  cookie extraction in the background. Never opens a login window here. */
   init(): void {
     this.browser.setCookies(this.cookies);
-    if (!this.hasCookies()) void this.backgroundExtract();
+    if (this.meta.signedOut) this.browser.markClearOnLaunch();
+    else if (!this.hasCookies()) void this.backgroundExtract();
   }
 
   hasCookies(): boolean {
@@ -74,9 +95,9 @@ export class WebClient {
 
   private async backgroundExtract(): Promise<void> {
     try {
-      const result = await new CookieExtractor().extractCookies();
-      if (result.cookies.length > 0) {
-        this.applyCookies(result.cookies);
+      const result = await this.extractCookies();
+      if (result.cookies.length > 0 && !this.meta.signedOut && !this.hasCookies()) {
+        this.applyCookies(result.cookies, "browser", result.browser);
         console.error(`[web-client] Extracted ${result.cookies.length} cookies from ${result.browser}`);
       }
     } catch (e) {
@@ -98,11 +119,50 @@ export class WebClient {
     writeFileSync(this.config.cookiesPath, JSON.stringify(this.cookies, null, 2));
   }
 
-  private applyCookies(cookies: CookieEntry[]): void {
+  private loadMeta(): void {
+    try {
+      const m = JSON.parse(readFileSync(this.metaPath, "utf-8"));
+      const source = ["browser", "window", "manual"].includes(m?.source) ? (m.source as SessionSource) : null;
+      this.meta = { source, browser: typeof m?.browser === "string" ? m.browser : null, signedOut: m?.signedOut === true };
+    } catch {
+      // no sidecar (legacy cookies file / fresh install) → source unknown
+    }
+  }
+
+  private saveMeta(): void {
+    mkdirSync(path.dirname(this.metaPath), { recursive: true });
+    writeFileSync(this.metaPath, JSON.stringify(this.meta, null, 2));
+  }
+
+  private applyCookies(cookies: CookieEntry[], source: SessionSource, browser: string | null = null): void {
     this.cookies = cookies;
     this.account = null;
     this.browser.setCookies(cookies);
     this.saveCookies();
+    this.meta = { source, browser: source === "browser" ? browser || null : null, signedOut: false };
+    this.saveMeta();
+  }
+
+  /** Where the stored session came from (null when unknown or no session). */
+  sessionSource(): { sessionSource: SessionSource | null; sessionBrowser: string | null } {
+    if (!this.hasCookies()) return { sessionSource: null, sessionBrowser: null };
+    return { sessionSource: this.meta.source, sessionBrowser: this.meta.browser };
+  }
+
+  /** web_logout: stop a running sign-in, forget the session everywhere (memory, cookies
+   *  file, live browser profile, account cache) and stay signed out across restarts —
+   *  no silent browser extraction until the next web_login / web_set_cookies. */
+  async logout(): Promise<{ loggedOut: true; cookiesStored: false }> {
+    this.loginGen++;
+    this.loginPolling = false;
+    this.cookies = [];
+    this.account = null;
+    rmSync(this.config.cookiesPath, { force: true });
+    this.meta = { source: null, browser: null, signedOut: true };
+    this.saveMeta();
+    await this.browser.clearSiteCookies();
+    await this.browser.close(); // closes the sign-in window too
+    return { loggedOut: true, cookiesStored: false };
   }
 
   /** "name=value; name2=value2" (a browser Cookie header) → cookies on .nexusmods.com. */
@@ -117,7 +177,7 @@ export class WebClient {
         return { name: c.slice(0, eq).trim(), value: c.slice(eq + 1).trim(), domain: ".nexusmods.com", path: "/" };
       })
       .filter((c): c is CookieEntry => c !== null);
-    this.applyCookies(entries);
+    this.applyCookies(entries, "manual");
     return entries.length;
   }
 
@@ -171,6 +231,7 @@ export class WebClient {
       cookiesStored: this.hasCookies(),
       detail: who.detail,
       account: null,
+      ...this.sessionSource(),
     };
     if (who.loggedIn) {
       try {
@@ -190,7 +251,7 @@ export class WebClient {
   async login(): Promise<LoginOutcome> {
     const result = await this.extractCookies();
     if (result.cookies.length > 0) {
-      this.applyCookies(result.cookies);
+      this.applyCookies(result.cookies, "browser", result.browser);
       const who = await this.whoAmI().catch(() => ({ loggedIn: false, detail: "check failed" }));
       if (who.loggedIn)
         return { loggedIn: true, loginWindowOpened: false, detail: `Extracted ${result.cookies.length} cookies from ${result.browser}; logged in.` };
@@ -210,7 +271,9 @@ export class WebClient {
       return no(`Could not open the login browser: ${e instanceof Error ? e.message : e} (run: npx patchright install chromium)`);
     }
     this.loginPolling = true;
+    const gen = this.loginGen;
     void this.pollForLogin(LOGIN_TIMEOUT_MS).finally(() => {
+      if (gen !== this.loginGen) return; // logout already stopped it and closed the window
       this.loginPolling = false;
       void this.browser.close();
     });
@@ -226,13 +289,17 @@ export class WebClient {
 
   private async pollForLogin(timeoutMs: number): Promise<boolean> {
     const start = Date.now();
+    const gen = this.loginGen;
     try {
       while (Date.now() - start < timeoutMs) {
         await new Promise((r) => setTimeout(r, 3000));
+        if (gen !== this.loginGen) return false; // web_logout
         const who = await this.whoAmI().catch(() => ({ loggedIn: false }));
+        if (gen !== this.loginGen) return false;
         if (who.loggedIn) {
           const cookies = await this.browser.getCookies();
-          this.applyCookies(cookies);
+          if (gen !== this.loginGen) return false;
+          this.applyCookies(cookies, "window");
           console.error(`[web-client] Login detected — ${cookies.length} cookies saved.`);
           return true;
         }

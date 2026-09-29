@@ -28,6 +28,8 @@ const CF_WAIT_MS = 45_000;
 
 export const WWW_ORIGIN = "https://www.nexusmods.com";
 export const FORUMS_ORIGIN = "https://forums.nexusmods.com";
+/** Every nexusmods.com cookie domain (".nexusmods.com", "www.", "forums.", "users."). */
+const NEXUS_COOKIE_DOMAIN = /(^|\.)nexusmods\.com$/;
 
 /** Which site page a request runs from. fetch() executes inside that page, so it carries
  *  the page's cookies and passes Cloudflare. Cross-origin calls (e.g. api-router GraphQL)
@@ -48,6 +50,30 @@ export class BrowserClient {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   /** Per-process profile in use (shared one was locked); deleted on close. */
   private tempProfileDir: string | null = null;
+  /** Wipe nexusmods.com cookies from the profile on the next launch (signed out while
+   *  no context was open: the persistent profile on disk may still hold the session). */
+  private clearOnLaunch = false;
+
+  /** Remove every nexusmods.com cookie: from the live context now, else on next launch. */
+  async clearSiteCookies(): Promise<void> {
+    this.cookies = [];
+    const pending = this.initPromise;
+    if (pending) await pending.catch(() => {});
+    if (this.context) {
+      try {
+        await this.context.clearCookies({ domain: NEXUS_COOKIE_DOMAIN });
+        return;
+      } catch (e) {
+        console.error(`[browser-client] clearCookies failed: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+    this.clearOnLaunch = true;
+  }
+
+  /** Clear the profile's nexusmods.com cookies whenever a context launches. */
+  markClearOnLaunch(): void {
+    this.clearOnLaunch = true;
+  }
 
   setCookies(cookies: CookieEntry[]): void {
     this.cookies = cookies;
@@ -255,6 +281,10 @@ export class BrowserClient {
     }
     this.context = context;
     try {
+      if (this.clearOnLaunch) {
+        await context.clearCookies({ domain: NEXUS_COOKIE_DOMAIN });
+        this.clearOnLaunch = false;
+      }
       if (this.cookies.length) await context.addCookies(this.cookies.map(toPlaywrightCookie));
     } catch (err) {
       this.context = null;

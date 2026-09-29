@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { WebClient, memberIdFromGid, LOGIN_TIMEOUT_MS } from "../src/clients/web-client.js";
@@ -19,7 +19,15 @@ function fakeBrowser(opts: { loggedIn?: boolean; userFails?: boolean } = {}) {
   const b = {
     calls,
     closed: 0,
+    cleared: 0,
+    clearOnLaunch: 0,
     setCookies() {},
+    async clearSiteCookies() {
+      b.cleared++;
+    },
+    markClearOnLaunch() {
+      b.clearOnLaunch++;
+    },
     async fetch(_url: string, init: { body?: string } = {}) {
       const { operationName, query } = JSON.parse(init.body || "{}");
       calls[operationName] = (calls[operationName] || 0) + 1;
@@ -43,8 +51,9 @@ function fakeBrowser(opts: { loggedIn?: boolean; userFails?: boolean } = {}) {
   return b;
 }
 
-function client(browser: ReturnType<typeof fakeBrowser>, cookies: unknown[] = []) {
-  const dir = mkdtempSync(path.join(tmpdir(), "nexus-web-"));
+const COOKIE = { name: "s", value: "x", domain: ".nexusmods.com", path: "/" };
+
+function client(browser: ReturnType<typeof fakeBrowser>, cookies: unknown[] = [], dir = mkdtempSync(path.join(tmpdir(), "nexus-web-"))) {
   const web = new WebClient({ cookiesPath: path.join(dir, "cookies.json") } as any);
   (web as any).browser = browser;
   (web as any).extractCookies = async () => ({ cookies, browser: "fake" });
@@ -69,6 +78,8 @@ test("web_status json: account when logged in, cached until cookies change", asy
     cookiesStored: true,
     detail: "session valid",
     account: { memberId: 6541781, name: "UberMorgott" },
+    sessionSource: "manual",
+    sessionBrowser: null,
   });
   await web.statusJson();
   assert.equal(b.calls.UserName, 1, "identity cached");
@@ -114,4 +125,82 @@ test("web_login json: opens the window, polls, closes it after capture", async (
   assert.equal(web.loginInProgress(), false);
   assert.equal(b.closed, 1, "window closed after capture");
   assert.equal(web.hasCookies(), true);
+});
+
+test("session source: browser extraction, window capture, manual; persisted across restarts", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "nexus-web-"));
+  const web = client(fakeBrowser(), [COOKIE], dir);
+  await web.login();
+  assert.deepEqual(web.sessionSource(), { sessionSource: "browser", sessionBrowser: "fake" });
+  const s = await web.statusJson();
+  assert.equal(s.sessionSource, "browser");
+  assert.equal(s.sessionBrowser, "fake");
+  // restart: read back from the sidecar
+  assert.deepEqual(client(fakeBrowser(), [], dir).sessionSource(), { sessionSource: "browser", sessionBrowser: "fake" });
+
+  web.setCookiesFromString("a=1");
+  assert.deepEqual(client(fakeBrowser(), [], dir).sessionSource(), { sessionSource: "manual", sessionBrowser: null });
+
+  const w = client(fakeBrowser(), [], dir);
+  await (w as any).pollForLogin(10_000);
+  assert.deepEqual(w.sessionSource(), { sessionSource: "window", sessionBrowser: null });
+});
+
+test("session source: legacy cookies file without sidecar → null", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "nexus-web-"));
+  writeFileSync(path.join(dir, "cookies.json"), JSON.stringify([COOKIE]));
+  const web = client(fakeBrowser(), [], dir);
+  assert.equal(web.hasCookies(), true);
+  assert.deepEqual(web.sessionSource(), { sessionSource: null, sessionBrowser: null });
+});
+
+test("init: background extraction counts as browser", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "nexus-web-"));
+  const web = client(fakeBrowser(), [COOKIE], dir);
+  web.init();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(web.hasCookies(), true);
+  assert.deepEqual(web.sessionSource(), { sessionSource: "browser", sessionBrowser: "fake" });
+});
+
+test("web_logout: clears everything, stops the sign-in poll, no re-extract at init until login", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "nexus-web-"));
+  const b = fakeBrowser();
+  const web = client(b, [], dir);
+  web.setCookiesFromString("a=1");
+  await web.statusJson(); // fills the account cache
+  (web as any).extractCookies = async () => ({ cookies: [], browser: "fake" });
+  await web.login(); // nothing to extract → sign-in window + poll
+  assert.equal(web.loginInProgress(), true);
+
+  assert.deepEqual(await web.logout(), { loggedOut: true, cookiesStored: false });
+  assert.equal(web.loginInProgress(), false);
+  assert.equal(web.hasCookies(), false);
+  assert.equal((web as any).account, null);
+  assert.equal(existsSync(path.join(dir, "cookies.json")), false);
+  assert.equal(b.cleared, 1, "live browser cookies cleared");
+  assert.equal(b.closed, 1, "browser/window closed");
+  assert.equal(JSON.parse(readFileSync(path.join(dir, "session.json"), "utf-8")).signedOut, true);
+  assert.deepEqual(web.sessionSource(), { sessionSource: null, sessionBrowser: null });
+  assert.equal(await web.logout().then((r) => r.loggedOut), true, "idempotent");
+
+  await new Promise((r) => setTimeout(r, 3500)); // a poll tick after logout captures nothing
+  assert.equal(web.hasCookies(), false);
+  assert.equal(b.closed, 2, "only the second logout closed again, not the stale poll");
+
+  // restart: installed browser still has a session, but init must not extract it
+  const b2 = fakeBrowser();
+  const again = client(b2, [COOKIE], dir);
+  let extracted = 0;
+  (again as any).extractCookies = async () => (extracted++, { cookies: [COOKIE], browser: "fake" });
+  again.init();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(extracted, 0);
+  assert.equal(again.hasCookies(), false);
+  assert.equal(b2.clearOnLaunch, 1, "profile cookies wiped on next launch");
+
+  // explicit web_login lifts the marker
+  await again.login();
+  assert.equal(again.hasCookies(), true);
+  assert.equal(JSON.parse(readFileSync(path.join(dir, "session.json"), "utf-8")).signedOut, false);
 });

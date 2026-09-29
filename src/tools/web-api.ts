@@ -83,7 +83,7 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
     },
     ({ format }) =>
       format === "json"
-        ? wrapJson("web_login", async () => ({ ...(await web.login()), loginInProgress: web.loginInProgress() }))
+        ? wrapJson("web_login", async () => ({ ...(await web.login()), loginInProgress: web.loginInProgress(), ...web.sessionSource() }))
         : wrap("web_login", () => web.autoExtractCookies()),
   );
 
@@ -96,6 +96,23 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     ({ cookies }) => wrap("web_set_cookies", async () => `Saved ${web.setCookiesFromString(cookies)} cookies.`),
+  );
+  server.registerTool(
+    "web_logout",
+    {
+      title: "Web Logout",
+      description:
+        "Sign out of nexusmods.com: stops a pending sign-in window, deletes the stored cookies and clears the session from the browser profile. Cookies are not silently re-extracted from installed browsers until the next web_login / web_set_cookies.",
+      inputSchema: { format: formatArg },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    ({ format }) =>
+      format === "json"
+        ? wrapJson("web_logout", () => web.logout())
+        : wrap("web_logout", async () => {
+            await web.logout();
+            return "Logged out: session cookies removed.";
+          }),
   );
 
   // ── Mod page comments (Posts tab) ──────────────────────────────
