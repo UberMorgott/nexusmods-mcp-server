@@ -18,6 +18,8 @@ import { resolveGameId } from "./graphql-api.js";
 import { dryRunReport } from "./web-api.js";
 import { success, error, errMsg } from "../utils/types.js";
 import { fmtDate, oneLine, truncate } from "../utils/helpers.js";
+import { formatArg, jsonResult, jsonError, CodedError } from "../utils/structured.js";
+import { modBugsJson, modBugJson, findPosted } from "./json-shapes.js";
 
 const WWW = WWW_ORIGIN;
 const READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
@@ -116,6 +118,7 @@ function isOne(body: string): boolean {
 
 export function registerWebModTools(server: McpServer, web: WebClient, api: NexusApiClient): void {
   const wrap = (name: string, fn: () => Promise<string>) => fn().then(success, (e) => error(`${name}: ${errMsg(e)}`));
+  const wrapJson = (name: string, fn: () => Promise<Record<string, unknown>>) => fn().then(jsonResult, (e) => jsonError(name, e));
 
   /** POST JSON to the editor's flamework API (flameworkFetch: credentials include, JSON). */
   async function flamework(pathname: string, body: unknown): Promise<any> {
@@ -151,11 +154,19 @@ export function registerWebModTools(server: McpServer, web: WebClient, api: Nexu
         mod_id: modId,
         page: z.number().int().min(1).optional().default(1),
         status: z.enum(Object.keys(BUG_STATUS) as [keyof typeof BUG_STATUS]).optional().default("all"),
+        format: formatArg,
       },
       annotations: READ,
     },
-    ({ game: g, mod_id, page, status }) =>
-      wrap("get_mod_bugs", async () => {
+    ({ game: g, mod_id, page, status, format }) =>
+      format === "json"
+        ? wrapJson("get_mod_bugs", async () => {
+            const gameId = await resolveGameId(api, g);
+            const d = await web.parse("modBugs", bugsUrl(gameId, mod_id, page, BUG_STATUS[status]));
+            if (!d.enabled) throw new CodedError("disabled", `Bug reports are not available for ${g}/${mod_id}.`);
+            return modBugsJson(g, mod_id, status, page, d);
+          })
+        : wrap("get_mod_bugs", async () => {
         const gameId = await resolveGameId(api, g);
         const d = await web.parse("modBugs", bugsUrl(gameId, mod_id, page, BUG_STATUS[status]));
         if (!d.enabled) return `Bug reports are not available for ${g}/${mod_id}.`;
@@ -171,11 +182,17 @@ export function registerWebModTools(server: McpServer, web: WebClient, api: Nexu
     {
       title: "Read Mod Bug Report",
       description: "Read one bug report and its replies (issue_id from get_mod_bugs).",
-      inputSchema: { issue_id: z.number().int().positive() },
+      inputSchema: { issue_id: z.number().int().positive(), format: formatArg },
       annotations: READ,
     },
-    ({ issue_id }) =>
-      wrap("get_mod_bug", async () => {
+    ({ issue_id, format }) =>
+      format === "json"
+        ? wrapJson("get_mod_bug", async () => {
+            const d = await web.parse("modBugReplies", `${WWW}/Core/Libs/Common/Widgets/ModBugReplyList`, { issue_id: String(issue_id) });
+            if (!d.posts.length || !d.posts[0].id) throw new CodedError("not_found", `Bug report ${issue_id} not found (deleted) or not visible to you.`);
+            return modBugJson(issue_id, d);
+          })
+        : wrap("get_mod_bug", async () => {
         const d = await web.parse("modBugReplies", `${WWW}/Core/Libs/Common/Widgets/ModBugReplyList`, { issue_id: String(issue_id) });
         // A deleted/unknown issue still renders an empty report tile (id "").
         if (!d.posts.length || !d.posts[0].id) return `Bug report ${issue_id} not found (deleted) or not visible to you.`;
@@ -225,11 +242,35 @@ export function registerWebModTools(server: McpServer, web: WebClient, api: Nexu
     {
       title: "Reply to Mod Bug Report",
       description: "Reply to a bug report (issue_id from get_mod_bugs). BBCode allowed. Needs a logged-in web session.",
-      inputSchema: { issue_id: z.number().int().positive(), text: z.string().min(1).max(5000), dry_run: dryRunArg },
+      inputSchema: { issue_id: z.number().int().positive(), text: z.string().min(1).max(5000), dry_run: dryRunArg, format: formatArg },
       annotations: WRITE,
     },
-    ({ issue_id, text, dry_run }) =>
-      wrap("reply_mod_bug", async () => {
+    ({ issue_id, text, dry_run, format }) =>
+      format === "json"
+        ? wrapJson("reply_mod_bug", async () => {
+            const list = () => web.parse("modBugReplies", `${WWW}/Core/Libs/Common/Widgets/ModBugReplyList`, { issue_id: String(issue_id) });
+            const d = await list();
+            if (!d.replyToken) throw new CodedError("not_logged_in", "no reply form token — not logged in (run web_login), issue closed, or not visible");
+            const fields = { content: text, _token: d.replyToken };
+            const url = `/mod_bug/${issue_id}/reply`;
+            const base = { dryRun: false, parentId: String(issue_id) };
+            if (dry_run)
+              return { ...base, posted: false, dryRun: true, id: null, verified: false, httpStatus: null, request: dryRunReport("POST", `${WWW}${url}`, Object.entries(fields), "XHR, application/x-www-form-urlencoded") };
+            const r = await web.postForm(url, "POST", fields);
+            let j: any = null;
+            try {
+              j = JSON.parse(r.body);
+            } catch {
+              // plain body → error
+            }
+            // Always read back: the endpoint returns no id, and may answer HTTP 500 yet save.
+            const before = new Set<string>(d.posts.map((p: any) => String(p.id)));
+            const after = await list().catch(() => null);
+            const id = after ? findPosted(after.posts, text, before) : null;
+            if (id || (r.status === 200 && j?.status === true)) return { ...base, posted: true, id, verified: id !== null, httpStatus: r.status };
+            throw new Error(`HTTP ${r.status}: ${oneLine(j?.message || r.body.replace(/<[^>]*>/g, " "), 300)}`);
+          })
+        : wrap("reply_mod_bug", async () => {
         const d = await web.parse("modBugReplies", `${WWW}/Core/Libs/Common/Widgets/ModBugReplyList`, { issue_id: String(issue_id) });
         if (!d.replyToken) throw new Error("no reply form token — not logged in (run web_login), issue closed, or not visible");
         const fields = { content: text, _token: d.replyToken };

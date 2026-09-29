@@ -1,0 +1,190 @@
+<span></span>
+<div id="tab-modbugs" class="container tab-bugs condensed">
+    <h2 id="bugs_tab_h2" data-game-id="3474" data-mod-id="141">Bug reports</h2>
+    <div class="comments">
+    <div class="comment-nav clearfix head-nav">
+<div class="pagination clearfix">
+    <div class="navlabel">
+        Pages
+    </div>
+    <ul class="clearfix">
+        <!-- this is our ACTIVE page, we always display it -->
+        <li>
+            <a class="page-selected mfp-prevent-close">
+                1            </a>
+        </li>
+                    <li>
+            <a class="mfp-prevent-close " href="javascript:;" onclick="return window.RH_ModBugsTab.Send('page', '2');">
+                    2            </a>
+        </li>
+                        <li>
+            <a class="mfp-prevent-close " href="javascript:;" onclick="return window.RH_ModBugsTab.Send('page', '3');">
+                    3            </a>
+        </li>
+                            <li class="empty extra">...</li>
+                    <li class="extra">
+            <a class="mfp-prevent-close " href="javascript:;" onclick="return window.RH_ModBugsTab.Send('page', '15');">
+                15            </a>
+        </li>
+                    <li class="next">
+            <a class="mfp-prevent-close " href="javascript:;" onclick="return window.RH_ModBugsTab.Send('page', '2');">
+                            </a>
+        </li>
+                </ul>
+                <select id="page_t" class="select-jump-page select-custom page_jump-to-page ">
+    &gt;
+        <option value="0" selected="selected">Jump</option>
+    </select>
+            </div>
+            <ul class="actions clearfix" style="margin:28px 0 0 12px; float:right;">
+        <li>
+            <a id="report-a-bug" class="popup-btn-ajax btn inline-flex" href="/Core/Libs/Common/Widgets/AddBugReportPopUp?game_id=3474&amp;mod_id=141" data-effect="mfp-zoom-in">
+                                <span class="flex-label">Report a bug</span>
+            </a>
+        </li>
+    </ul>
+                <ul class="sorting clearfix">
+                    <li class="">
+    <div class="navlabel">Status</div>
+    <select id="status" name="status" class="select-custom" onchange="return window.RH_ModBugsTab.Send('status', this );">
+                        <option value="-1" selected="selected">All issues</option>
+                        <option value="0">New issues</option>
+                        <option value="2">Being looked at</option>
+                        <option value="3">Fixed</option>
+                        <option value="1">Known issues</option>
+                        <option value="4">Duplicates</option>
+                        <option value="5">Not a bug</option>
+                        <option value="6">Won't fix</option>
+                        <option value="7">Need more info</option>
+                </select>
+</li>
+                <li class="">
+    <div class="navlabel">Priority</div>
+    <select id="priority" name="priority" class="select-custom" onchange="return window.RH_ModBugsTab.Send('priority', this );">
+                        <option value="-1" selected="selected">All priorities</option>
+                        <option value="0">Not set</option>
+                        <option value="1">Low</option>
+                        <option value="2">Medium</option>
+                        <option value="3">High</option>
+                </select>
+</li>
+                <li class="sort-by">
+    <div class="navlabel">Sort by</div>
+    <select id="sort_by" name="sort_by" class="select-custom" onchange="window.RH_ModBugsTab.Out('page', '1' ); return window.RH_ModBugsTab.Send('sort_by', this );">
+                        <option value="status">
+                Status            </option>
+                        <option value="date">
+                Date            </option>
+                        <option value="last_reply" selected="selected">
+                Last reply            </option>
+                        <option value="severity">
+                Priority            </option>
+                </select>
+</li>
+                <li class="sort-order">
+    <div class="navlabel">Order</div>
+    <select id="order" name="order" class="select-custom" onchange="window.RH_ModBugsTab.Out('page', '1' ); return window.RH_ModBugsTab.Send('order', this );">
+                        <option value="ASC">
+                Asc            </option>
+                        <option value="DESC" selected="selected">
+                Desc            </option>
+                </select>
+</li>
+    </ul>
+    </div>
+        <table class="table forum-bugs flex-table">
+            <thead>
+                <tr>
+                        <th class="table-bug-title sorter-false"><span>Bug title</span></th>
+                        <th class="table-bug-status sorter-false"><span class="">Status</span></th>
+                        <th class="table-bug-replies sorter-false"><span class="">Replies</span></th>
+                        <th class="table-bug-version sorter-false"><span class="">Version</span></th>
+                        <th class="table-bug-priority sorter-false"><span class="">Priority</span></th>
+                        <th class="table-bug-post sorter-false"><span class="">Last post</span></th>
+                </tr>
+            </thead>
+            <tbody>
+                                            <tr id="issue_1138938" data-issue-id="1138938" class="mod-issue-row">
+                                                            <td class="table-bug-title">
+                                                                                                            <a class="issue-title" href="javascript:;" onclick="loadIssueReplies(1138938);" id="issueClickLink_1138938">Human BT2 not showing the body, Just human. </a>
+                                    <span class="table-inline-hidden">Version: <i>Mod Fixer </i> - Version 1.0</span>
+                                    <span class="table-inline-hidden inline-status"><span class="orange">New issue</span></span>
+                                    <span class="table-inline-hidden">Priority: Not set</span>
+                                    <span id="issueFixedInVersion_1138938" style="width:100%;">
+                                                                            </span>
+                                                                    </td>
+                                <td id="issueStatus_1138938" class="table-bug-status"><span class="orange">New issue</span></td>
+                                <td class="table-bug-replies">0</td>
+                                <td class="table-bug-version"><i>Mod Fixer </i> - Version 1.0</td>
+                                <td id="issuePriority_1138938" class="table-bug-priority">Not set</td>
+                                <td id="placeRepliesAfterMe_1138938" class="table-bug-post"><time class="dst-date-adjust" data-date="1790255283" data-date-format="G:i, j M Y">13:08, 24 Sep 2026</time></td>
+                                                    </tr>
+                                        <tr id="issue_942599" data-issue-id="942599" class="mod-issue-row">
+                                                            <td class="table-bug-title">
+                                                                                                            <a class="issue-title" href="javascript:;" onclick="loadIssueReplies(942599);" id="issueClickLink_942599">invalid UUID</a>
+                                    <span class="table-inline-hidden">Version: <i>Mod Fixer </i> - Version 1.0</span>
+                                    <span class="table-inline-hidden inline-status"><span class="orange">New issue</span></span>
+                                    <span class="table-inline-hidden">Priority: Not set</span>
+                                    <span id="issueFixedInVersion_942599" style="width:100%;">
+                                                                            </span>
+                                                                    </td>
+                                <td id="issueStatus_942599" class="table-bug-status"><span class="orange">New issue</span></td>
+                                <td class="table-bug-replies">0</td>
+                                <td class="table-bug-version"><i>Mod Fixer </i> - Version 1.0</td>
+                                <td id="issuePriority_942599" class="table-bug-priority">Not set</td>
+                                <td id="placeRepliesAfterMe_942599" class="table-bug-post"><time class="dst-date-adjust" data-date="1746539352" data-date-format="G:i, j M Y">13:49, 6 May 2025</time></td>
+                                                    </tr>
+                                        <tr id="issue_942190" data-issue-id="942190" class="mod-issue-row">
+                                                            <td class="table-bug-title">
+                                                                                                            <a class="issue-title" href="javascript:;" onclick="loadIssueReplies(942190);" id="issueClickLink_942190">Invalid uuid</a>
+                                    <span class="table-inline-hidden">Version: <i>Mod Fixer </i> - Version 1.0</span>
+                                    <span class="table-inline-hidden inline-status"><span class="orange">New issue</span></span>
+                                    <span class="table-inline-hidden">Priority: Not set</span>
+                                    <span id="issueFixedInVersion_942190" style="width:100%;">
+                                                                            </span>
+                                                                    </td>
+                                <td id="issueStatus_942190" class="table-bug-status"><span class="orange">New issue</span></td>
+                                <td class="table-bug-replies">0</td>
+                                <td class="table-bug-version"><i>Mod Fixer </i> - Version 1.0</td>
+                                <td id="issuePriority_942190" class="table-bug-priority">Not set</td>
+                                <td id="placeRepliesAfterMe_942190" class="table-bug-post"><time class="dst-date-adjust" data-date="1746453070" data-date-format="G:i, j M Y">13:51, 5 May 2025</time></td>
+                                                    </tr>
+                            </tbody>
+        </table>
+        <div class="comment-nav clearfix bottom-nav">
+<div class="pagination clearfix">
+    <div class="navlabel">
+        Pages
+    </div>
+    <ul class="clearfix">
+        <!-- this is our ACTIVE page, we always display it -->
+        <li>
+            <a class="page-selected mfp-prevent-close">
+                1            </a>
+        </li>
+                    <li>
+            <a class="mfp-prevent-close " href="javascript:;" onclick="return window.RH_ModBugsTab.Send('page', '2');">
+                    2            </a>
+        </li>
+                        <li>
+            <a class="mfp-prevent-close " href="javascript:;" onclick="return window.RH_ModBugsTab.Send('page', '3');">
+                    3            </a>
+        </li>
+                            <li class="empty extra">...</li>
+                    <li class="extra">
+            <a class="mfp-prevent-close " href="javascript:;" onclick="return window.RH_ModBugsTab.Send('page', '15');">
+                15            </a>
+        </li>
+                    <li class="next">
+            <a class="mfp-prevent-close " href="javascript:;" onclick="return window.RH_ModBugsTab.Send('page', '2');">
+                            </a>
+        </li>
+                </ul>
+                <select id="page_b" class="select-jump-page select-custom page_jump-to-page ">
+    &gt;
+        <option value="0" selected="selected">Jump</option>
+    </select>
+            </div>
+        </div>
+        </div>
+    </div>

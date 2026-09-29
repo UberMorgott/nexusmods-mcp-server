@@ -12,6 +12,8 @@ import type { NexusApiClient } from "../clients/nexus-api.js";
 import { resolveGameId } from "./graphql-api.js";
 import { success, error, errMsg } from "../utils/types.js";
 import { fmtDate, oneLine, truncate } from "../utils/helpers.js";
+import { formatArg, jsonResult, jsonError, CodedError } from "../utils/structured.js";
+import { modCommentsJson, findPosted } from "./json-shapes.js";
 
 const WWW = "https://www.nexusmods.com";
 const FORUMS = "https://forums.nexusmods.com";
@@ -28,6 +30,8 @@ const DISCARD_COMMENT = `mutation DiscardComment($commentId: ID!) { discardComme
 
 export function registerWebTools(server: McpServer, web: WebClient, api: NexusApiClient): void {
   const wrap = (name: string, fn: () => Promise<string>) => fn().then(success, (e) => error(`${name}: ${errMsg(e)}`));
+  /** format "json" → structured result / coded error; "text" → unchanged text path. */
+  const wrapJson = (name: string, fn: () => Promise<Record<string, unknown>>) => fn().then(jsonResult, (e) => jsonError(name, e));
   const threadCache = new Map<string, number>();
 
   /** Mod comments live in a legacy thread; its id is only exposed on the mod page. */
@@ -37,7 +41,7 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
     let threadId = threadCache.get(key);
     if (!threadId) {
       const r = await web.parse("modThreadId", `${WWW}/${g}/mods/${id}`);
-      if (!r.threadId) throw new Error(`no Posts thread found for ${key} (comments disabled, or mod hidden)`);
+      if (!r.threadId) throw new CodedError("disabled", `no Posts thread found for ${key} (comments disabled, or mod hidden)`);
       threadId = r.threadId as number;
       threadCache.set(key, threadId);
     }
@@ -55,11 +59,16 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
     {
       title: "Web Session Status",
       description: "Check whether the browser session is logged in to nexusmods.com (needed only for web-tier WRITE tools).",
-      inputSchema: {},
+      inputSchema: { format: formatArg },
       annotations: READ,
     },
-    () =>
-      wrap("web_status", async () => {
+    ({ format }) =>
+      format === "json"
+        ? wrapJson("web_status", async () => {
+            const who = await web.whoAmI();
+            return { loggedIn: who.loggedIn, loginInProgress: web.loginInProgress(), cookiesStored: web.hasCookies(), detail: who.detail };
+          })
+        : wrap("web_status", async () => {
         const login = web.loginInProgress() ? "Login in progress (sign-in window open). " : "";
         const who = await web.whoAmI();
         return `${login}${who.loggedIn ? "Logged in" : "NOT logged in"} (${who.detail}); cookies stored: ${web.hasCookies()}`;
@@ -97,11 +106,17 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
       title: "Get Mod Comments (Posts tab)",
       description:
         "Read a mod page's Posts tab: threaded comments (id, author, date, text, inline replies), sticky first. 10 threads per page. Works without login.",
-      inputSchema: { game, mod_id: modId, page: z.number().int().min(1).optional().default(1) },
+      inputSchema: { game, mod_id: modId, page: z.number().int().min(1).optional().default(1), format: formatArg },
       annotations: READ,
     },
-    ({ game: g, mod_id, page }) =>
-      wrap("get_mod_comments", async () => {
+    ({ game: g, mod_id, page, format }) =>
+      format === "json"
+        ? wrapJson("get_mod_comments", async () => {
+            const { gameId, threadId } = await modThread(g, mod_id);
+            const d = await web.parse("modComments", widgetUrl(gameId, mod_id, threadId, page));
+            return modCommentsJson(g, mod_id, threadId, d);
+          })
+        : wrap("get_mod_comments", async () => {
         const { gameId, threadId } = await modThread(g, mod_id);
         const d = await web.parse("modComments", widgetUrl(gameId, mod_id, threadId, page));
         const out = [`${d.total} comments on ${g}/${mod_id} (thread ${threadId}) — page ${d.page}/${d.pages}`];
@@ -114,11 +129,26 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
       }),
   );
 
-  async function commentToken(g: string, id: number): Promise<{ gameId: number; threadId: number; token: string }> {
+  async function commentToken(g: string, id: number): Promise<{ gameId: number; threadId: number; token: string; page1: any }> {
     const { gameId, threadId } = await modThread(g, id);
     const d = await web.parse("modComments", widgetUrl(gameId, id, threadId, 1));
-    if (!d.csrfToken) throw new Error("no comment form token — not logged in (run web_login) or comments are locked for you");
-    return { gameId, threadId, token: d.csrfToken };
+    if (!d.csrfToken) throw new CodedError("not_logged_in", "no comment form token — not logged in (run web_login) or comments are locked for you");
+    return { gameId, threadId, token: d.csrfToken, page1: d };
+  }
+
+  const flatIds = (d: any): Set<string> => new Set(d.comments.flatMap((c: any) => [String(c.id), ...c.replies.map((r: any) => String(r.id))]));
+
+  /** post_mod_comment answers "1" without an id: find the new comment by reading back
+   *  (top-level: page 1; reply: the parent's thread, first 5 pages). */
+  async function readBackComment(g: string, id: number, gameId: number, threadId: number, text: string, parentId: number | undefined, before: Set<string>): Promise<string | null> {
+    const first = await web.parse("modComments", widgetUrl(gameId, id, threadId, 1));
+    if (!parentId) return findPosted(first.comments, text, before);
+    for (let p = 1; p <= Math.min(first.pages, 5); p++) {
+      const d = p === 1 ? first : await web.parse("modComments", widgetUrl(gameId, id, threadId, p));
+      const parent = d.comments.find((c: any) => String(c.id) === String(parentId));
+      if (parent) return findPosted(parent.replies, text, before);
+    }
+    return null;
   }
 
   server.registerTool(
@@ -132,11 +162,28 @@ export function registerWebTools(server: McpServer, web: WebClient, api: NexusAp
         mod_id: modId,
         text: z.string().min(1),
         parent_id: z.number().int().positive().optional().describe("Comment id to reply to; omit for a new top-level comment"),
+        format: formatArg,
       },
       annotations: WRITE,
     },
-    ({ game: g, mod_id, text, parent_id }) =>
-      wrap("post_mod_comment", async () => {
+    ({ game: g, mod_id, text, parent_id, format }) =>
+      format === "json"
+        ? wrapJson("post_mod_comment", async () => {
+            const { gameId, threadId, token, page1 } = await commentToken(g, mod_id);
+            const r = await web.postForm("/mod/comment", "POST", {
+              game_id: gameId,
+              object_id: mod_id,
+              thread_id: threadId,
+              post: encodeURIComponent(text),
+              use_emo: 0,
+              parent_id: parent_id ?? 0,
+              _token: token,
+            });
+            if (!(r.status === 200 && r.body.trim() === "1")) throw new Error(`HTTP ${r.status}: ${oneLine(r.body.replace(/<[^>]*>/g, " "), 300)}`);
+            const newId = await readBackComment(g, mod_id, gameId, threadId, text, parent_id, flatIds(page1)).catch(() => null);
+            return { posted: true, dryRun: false, id: newId, parentId: parent_id ? String(parent_id) : null, verified: newId !== null, httpStatus: r.status };
+          })
+        : wrap("post_mod_comment", async () => {
         const { gameId, threadId, token } = await commentToken(g, mod_id);
         // Mirrors addNewComment() in the site's app bundle: POST /mod/comment, post is encodeURIComponent'd.
         const r = await web.postForm("/mod/comment", "POST", {

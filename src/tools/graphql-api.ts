@@ -6,6 +6,8 @@ import { z } from "zod/v4";
 import type { NexusApiClient } from "../clients/nexus-api.js";
 import { success, error, errMsg } from "../utils/types.js";
 import { fmtDate, fmtNum, oneLine, truncate, stripHtml } from "../utils/helpers.js";
+import { formatArg, jsonResult, jsonError } from "../utils/structured.js";
+import { modsJson } from "./json-shapes.js";
 
 const READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const game = z.string().min(1).describe('Game domain name, e.g. "skyrimspecialedition"');
@@ -56,24 +58,34 @@ export function registerGraphqlTools(server: McpServer, api: NexusApiClient): vo
         count: z.number().int().min(1).max(50).optional().default(10),
         offset: z.number().int().min(0).optional().default(0),
         include_adult: z.boolean().optional().default(false),
+        format: formatArg,
       },
       annotations: READ,
     },
-    ({ query, game: g, author, sort, direction, count, offset, include_adult }) =>
-      wrap("search_mods", async () => {
+    ({ query, game: g, author, sort, direction, count, offset, include_adult, format }) => {
+      const run = (fields: string) => {
         const filter: Record<string, unknown> = {};
         if (query) filter.name = [{ value: query, op: "WILDCARD" }];
         if (g) filter.gameDomainName = [{ value: g, op: "EQUALS" }];
         if (author) filter.author = [{ value: author, op: "EQUALS" }];
         if (!include_adult) filter.adultContent = [{ value: false, op: "EQUALS" }];
         const sortKey = sort === "name" ? "name" : sort;
-        const d = await api.graphql(
-          `query($f:ModsFilter,$s:[ModsSort!],$c:Int,$o:Int){ mods(filter:$f, sort:$s, count:$c, offset:$o){ totalCount nodes{ modId name version author summary downloads endorsements updatedAt game{ domainName } } } }`,
+        return api.graphql(
+          `query($f:ModsFilter,$s:[ModsSort!],$c:Int,$o:Int){ mods(filter:$f, sort:$s, count:$c, offset:$o){ totalCount nodes{ ${fields} } } }`,
           { f: filter, s: [{ [sortKey]: { direction } }], c: count, o: offset },
         );
+      };
+      if (format === "json")
+        return run("modId uid name version author summary downloads endorsements createdAt updatedAt uploader{ name memberId } game{ domainName }").then(
+          (d) => jsonResult(modsJson(d.mods, offset, count)),
+          (e) => jsonError("search_mods", e),
+        );
+      return wrap("search_mods", async () => {
+        const d = await run("modId name version author summary downloads endorsements updatedAt game{ domainName }");
         const nodes: any[] = d.mods.nodes;
         return `${d.mods.totalCount} matches (showing ${offset + 1}-${offset + nodes.length}):\n${nodes.map(formatGqlMod).join("\n")}`;
-      }),
+      });
+    },
   );
 
   server.registerTool(

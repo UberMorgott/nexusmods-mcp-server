@@ -24,7 +24,7 @@ npm run setup      # wizard: API key, web session
 
 ## Conventions
 - NEVER write to stdout (stdout = JSON-RPC). Log via console.error.
-- `import { z } from "zod/v4"`; every tool has `annotations`; handlers return `success()`/`error()`; compact text output.
+- `import { z } from "zod/v4"`; every tool has `annotations`; handlers return `success()`/`error()`; compact text output. Machine output = opt-in `format: "json"` (`src/utils/structured.ts`, shapes in `src/tools/json-shapes.ts`, README → Structured output); text stays default and unchanged.
 - Every Nexus API request sends `Application-Name` + `Application-Version`.
 - Web-tier tools only for requests the site itself makes; record evidence/TODO in `docs/web-endpoints.md`. No guessed endpoints.
 - `docs/research.md` = API source of truth. v3 upload flow = official `Nexus-Mods/upload-action` schema.
@@ -33,6 +33,7 @@ npm run setup      # wizard: API key, web session
 
 ## Testing
 ```bash
+npm test   # fixture tests (test/fixtures = saved site widgets, anonymized), no network
 npx @modelcontextprotocol/inspector node build/index.js
 ```
 Never post/upload/send on Nexus while testing unless the user approves; use `dry_run: true`

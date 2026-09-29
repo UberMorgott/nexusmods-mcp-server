@@ -102,10 +102,20 @@ export async function fetchAndParse({ kind, url, form }: ParseArgs): Promise<any
     return max;
   };
 
+  // Member id from the avatar URL (avatars.nexusmods.com/<memberId>/...) or a /users/<id> link.
+  const memberIdOf = (head: Element | null): number | null => {
+    const src = head?.querySelector("img[src*='avatars.nexusmods.com/']")?.getAttribute("src") || "";
+    const href = head?.querySelector(".comment-name a")?.getAttribute("href") || "";
+    const m = src.match(/avatars\.nexusmods\.com\/(\d+)/) || href.match(/\/users\/(\d+)/);
+    return m ? Number(m[1]) : null;
+  };
+
   if (kind === "modComments") {
     const pick = (li: Element): any => ({
       id: li.id.replace("comment-", ""),
       author: txt(li.querySelector(":scope > .comment-head .comment-name a")) || "?",
+      authorId: memberIdOf(li.querySelector(":scope > .comment-head")),
+      isModAuthor: li.classList.contains("comment-author"),
       date: Number(li.querySelector(":scope > .comment-content time[data-date]")?.getAttribute("data-date")) || 0,
       sticky: li.classList.contains("comment-sticky"),
       locked: !!li.querySelector(":scope > .comment-content .locked:not([style*='none'])"),
@@ -113,6 +123,8 @@ export async function fetchAndParse({ kind, url, form }: ParseArgs): Promise<any
       replies: Array.from(li.querySelectorAll(":scope > ol.comment-kids > li.comment")).map((k) => ({
         id: k.id.replace("comment-", ""),
         author: txt(k.querySelector(":scope > .comment-head .comment-name a")) || "?",
+        authorId: memberIdOf(k.querySelector(":scope > .comment-head")),
+        isModAuthor: k.classList.contains("comment-author"),
         date: Number(k.querySelector(":scope > .comment-content time[data-date]")?.getAttribute("data-date")) || 0,
         text: textOf(k.querySelector(":scope > .comment-content .comment-content-text")),
       })),
@@ -243,6 +255,7 @@ export async function fetchAndParse({ kind, url, form }: ParseArgs): Promise<any
         id: li.id.replace(/^bug-(issue|reply)-tile-/, ""),
         isReport: li.id.startsWith("bug-issue-tile-"),
         author: txt(li.querySelector(".comment-name a")) || "?",
+        authorId: memberIdOf(li.querySelector(".comment-head")),
         date: li.querySelector(".comment-content time[datetime]")?.getAttribute("datetime") || "",
         text: textOf(body),
       };

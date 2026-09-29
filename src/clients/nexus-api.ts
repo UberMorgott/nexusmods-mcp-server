@@ -76,8 +76,18 @@ export class NexusApiClient {
   }
 
   private async send(url: string, init: RequestInit): Promise<Response> {
-    const res = await fetch(url, init);
+    let res = await fetch(url, init);
     this.readRateLimit(res);
+    // Reads (GET, GraphQL queries) back off once on 429/503: Retry-After (≤ 30 s) else 2 s.
+    // Writes are never retried.
+    const isRead = (init.method ?? "GET") === "GET" || (url === V2_GRAPHQL && !/^\s*mutation\b/.test(String(init.body ?? "").replace(/^\{"query":"/, "")));
+    if ((res.status === 429 || res.status === 503) && isRead) {
+      const wait = Math.min(Number(res.headers.get("retry-after")) || 2, 30) * 1000;
+      await res.body?.cancel().catch(() => undefined);
+      await new Promise((r) => setTimeout(r, wait));
+      res = await fetch(url, init);
+      this.readRateLimit(res);
+    }
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       let detail = body.slice(0, 500);
