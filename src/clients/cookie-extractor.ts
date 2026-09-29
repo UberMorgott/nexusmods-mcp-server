@@ -1,6 +1,9 @@
 // Copyright (c) 2026 Morgott
 // Licensed under CC BY-NC 4.0 — see LICENSE.
 
+import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
+import path from "node:path";
 import type { CookieObject } from "@rookie-rs/api";
 import type { CookieEntry } from "../utils/types.js";
 
@@ -14,22 +17,66 @@ export interface ExtractionResult {
 
 const NEXUS_DOMAINS = [".nexusmods.com", "nexusmods.com"];
 
-type BrowserFn = (domains?: string[] | null) => CookieObject[];
 type Rookie = typeof import("@rookie-rs/api");
+type Reader = (r: Rookie, domains: string[]) => CookieObject[];
 
 /** Browser id → reader. Order = silent-extraction order. */
-const READERS: Array<[string, (r: Rookie) => BrowserFn]> = [
-  ["chrome", (r) => r.chrome],
-  ["firefox", (r) => r.firefox],
-  ["edge", (r) => r.edge],
-  ["brave", (r) => r.brave],
-  ["chromium", (r) => r.chromium],
-  ["opera", (r) => r.opera],
-  ["opera-gx", (r) => r.operaGx],
-  ["vivaldi", (r) => r.vivaldi],
-  ["arc", (r) => r.arc],
-  ["librewolf", (r) => r.librewolf],
+const READERS: Array<[string, Reader]> = [
+  ["chrome", (r, d) => r.chrome(d)],
+  ["firefox", (r, d) => r.firefox(d)],
+  ["edge", (r, d) => r.edge(d)],
+  ["brave", (r, d) => r.brave(d)],
+  ["chromium", (r, d) => r.chromium(d)],
+  ["opera", (r, d) => r.opera(d)],
+  ["opera-gx", (r, d) => r.operaGx(d)],
+  ["vivaldi", (r, d) => r.vivaldi(d)],
+  ["centbrowser", (r, d) => readChromiumProfiles(r, centUserDataDirs(), d)],
+  ["arc", (r, d) => r.arc(d)],
+  ["librewolf", (r, d) => r.librewolf(d)],
 ];
+
+/** Cent Browser (Chromium fork) user-data dirs: the installer location, plus
+ *  "<exe dir>\User Data" of the registered https handler (portable installs). */
+export function centUserDataDirs(): string[] {
+  const dirs: string[] = [];
+  if (process.env.LOCALAPPDATA) dirs.push(path.join(process.env.LOCALAPPDATA, "CentBrowser", "User Data"));
+  if (process.platform === "win32") {
+    try {
+      const keys = execFileSync("reg", ["query", "HKCU\\Software\\Classes", "/f", "CentHTM", "/k"], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
+      const key = /^(HKEY_CURRENT_USER\\Software\\Classes\\CentHTM\S*)/im.exec(keys)?.[1];
+      if (key) {
+        const cmd = execFileSync("reg", ["query", `${key}\\shell\\open\\command`, "/ve"], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
+        const exe = /REG_SZ\s+"([^"]+)"/i.exec(cmd)?.[1];
+        if (exe) dirs.push(path.join(path.dirname(exe), "User Data"));
+      }
+    } catch {
+      // not registered
+    }
+  }
+  return [...new Set(dirs)].filter((d) => existsSync(path.join(d, "Local State")));
+}
+
+/** Chromium-layout store: every profile's (Network\)Cookies, decrypted with the Local State key.
+ *  Returns the first profile that has cookies for the domains. */
+function readChromiumProfiles(r: Rookie, userDataDirs: string[], domains: string[]): CookieObject[] {
+  if (!userDataDirs.length) throw new Error("not installed");
+  let lastErr: unknown = null;
+  for (const dir of userDataDirs) {
+    const profiles = readdirSync(dir).filter((n) => n === "Default" || /^Profile \d+$/.test(n));
+    for (const p of profiles) {
+      const db = [path.join(dir, p, "Network", "Cookies"), path.join(dir, p, "Cookies")].find(existsSync);
+      if (!db) continue;
+      try {
+        const got = r.chromiumBased(path.join(dir, "Local State"), db, domains);
+        if (got.length) return got;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+  }
+  if (lastErr) throw lastErr;
+  return [];
+}
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e)).split("\n")[0];
 
@@ -69,7 +116,11 @@ export class CookieExtractor {
     const reader = READERS.find(([n]) => n === browser)?.[1];
     if (!reader) return { browser, cookies: [], error: `no cookie reader for ${browser}` };
     try {
-      const raw = reader(rookie)(NEXUS_DOMAINS);
+      const raw = reader(rookie, NEXUS_DOMAINS);
+      // rookie swallows per-cookie decrypt failures and returns empty values
+      // (e.g. a cookie encryption format it doesn't know) — the store is not usable.
+      if (raw.length > 0 && raw.every((c) => !c.value))
+        return { browser, cookies: [], error: `cookie values could not be decrypted (${raw.length} cookies, all empty)` };
       return { browser, cookies: raw.map((c) => ({ name: c.name, value: c.value, domain: c.domain, path: c.path })) };
     } catch (e) {
       return { browser, cookies: [], error: errText(e) };

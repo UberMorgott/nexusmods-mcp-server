@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { WebClient, memberIdFromGid, LOGIN_TIMEOUT_MS } from "../src/clients/web-client.js";
 import { browserFromProgId } from "../src/utils/default-browser.js";
+import { CookieExtractor } from "../src/clients/cookie-extractor.js";
 
 const GID = Buffer.from("gid://api/MembersPreference/6541781").toString("base64");
 
@@ -238,6 +239,7 @@ test("browserFromProgId: ProgId map", () => {
   assert.equal(browserFromProgId("OperaGXStable"), "opera-gx");
   assert.equal(browserFromProgId("VivaldiHTM.ABC"), "vivaldi");
   assert.equal(browserFromProgId("YandexHTML"), "yandex");
+  assert.equal(browserFromProgId("CentHTM.PVOYJF5YAEQRUHCVWLHIFLU56M"), "centbrowser");
   assert.equal(browserFromProgId("IE.HTTPS"), null);
 });
 
@@ -310,4 +312,16 @@ test("web_login_cancel: stops default-browser polling", async () => {
   assert.ok(st.polls <= polls + 1, "polling stopped");
   assert.equal(web.hasCookies(), false);
   assert.equal(b.closed, 0, "user's browser page is not ours to close");
+});
+test("cookie extractor: all-empty values (undecryptable store) → unreadable", () => {
+  const ex = new CookieExtractor() as any;
+  const rows = (v: string) => [{ name: "a", value: v, domain: ".nexusmods.com", path: "/" }];
+  const empty = ex.read({ chrome: () => rows("") }, "chrome");
+  assert.match(empty.error, /could not be decrypted/);
+  assert.deepEqual(empty.cookies, []);
+  const ok = ex.read({ chrome: () => rows("x") }, "chrome");
+  assert.equal(ok.error, undefined);
+  assert.equal(ok.cookies.length, 1);
+  assert.match(ex.read({ chrome: () => { throw new Error("locked\nmore"); } }, "chrome").error, /^locked$/);
+  assert.match(ex.read({}, "yandex").error, /no cookie reader/);
 });

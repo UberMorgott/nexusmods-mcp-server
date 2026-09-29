@@ -24,6 +24,7 @@ export function browserFromProgId(progId: string): string | null {
   if (/^Opera/i.test(p)) return "opera";
   if (/^VivaldiHTM/i.test(p)) return "vivaldi";
   if (/^YandexHTML/i.test(p)) return "yandex";
+  if (/^CentHTM/i.test(p)) return "centbrowser";
   return null;
 }
 
