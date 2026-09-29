@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { WebClient, memberIdFromGid, LOGIN_TIMEOUT_MS } from "../src/clients/web-client.js";
 import { browserFromProgId } from "../src/utils/default-browser.js";
-import { CookieExtractor } from "../src/clients/cookie-extractor.js";
+import { CookieExtractor, cookieStoreFiles } from "../src/clients/cookie-extractor.js";
 
 const GID = Buffer.from("gid://api/MembersPreference/6541781").toString("base64");
 
@@ -220,6 +220,8 @@ function withDefaultBrowser(web: WebClient, opts: { readable?: boolean; after?: 
   (web as any).detectDefaultBrowser = async () => ({ progId: "ChromeHTML", browser: "chrome" });
   (web as any).openUrl = async (u: string) => void st.opened.push(u);
   (web as any).defaultBrowserPollMs = 10;
+  let sigN = 0;
+  (web as any).storeSignature = () => `sig${sigN++}`; // store changes every tick
   let probed = false;
   (web as any).extractFrom = async (b: string) => {
     if (opts.readable === false) return { browser: b, cookies: [], error: "app-bound encryption" };
@@ -324,4 +326,33 @@ test("cookie extractor: all-empty values (undecryptable store) → unreadable", 
   assert.equal(ok.cookies.length, 1);
   assert.match(ex.read({ chrome: () => { throw new Error("locked\nmore"); } }, "chrome").error, /^locked$/);
   assert.match(ex.read({}, "yandex").error, /no cookie reader/);
+});
+test("default-browser poll gate: reads only when the cookie store changed, else once per forcedReadMs", async () => {
+  const web = client(fakeBrowser());
+  const st = withDefaultBrowser(web, { after: 1_000_000 });
+  let sig = "A";
+  (web as any).storeSignature = () => sig;
+  (web as any).forcedReadMs = 60_000;
+  await web.login(); // probe read on open (fingerprint "A")
+  await new Promise((r) => setTimeout(r, 120)); // ~10 ticks, store unchanged
+  assert.equal(st.polls, 0, "unchanged store → no reads");
+  sig = "B"; // browser wrote cookies
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(st.polls, 1, "one read per change");
+  (web as any).forcedReadMs = 30; // forced re-read of an unchanged store
+  await new Promise((r) => setTimeout(r, 150));
+  assert.ok(st.polls >= 2 && st.polls <= 7, `forced reads rate-limited (got ${st.polls})`);
+  await web.cancelLogin();
+});
+
+test("default-browser poll gate: unknown store location → forced reads only", async () => {
+  const web = client(fakeBrowser());
+  const st = withDefaultBrowser(web, { after: 1_000_000 });
+  (web as any).storeSignature = () => null;
+  (web as any).forcedReadMs = 60_000;
+  await web.login();
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(st.polls, 0);
+  await web.cancelLogin();
+  assert.equal(cookieStoreFiles("yandex"), null);
 });

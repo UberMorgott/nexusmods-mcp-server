@@ -2,7 +2,7 @@
 // Licensed under CC BY-NC 4.0 — see LICENSE.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import type { CookieObject } from "@rookie-rs/api";
 import type { CookieEntry } from "../utils/types.js";
@@ -54,6 +54,68 @@ export function centUserDataDirs(): string[] {
     }
   }
   return [...new Set(dirs)].filter((d) => existsSync(path.join(d, "Local State")));
+}
+
+/** Chromium user-data dirs per browser (Opera keeps the profile itself there). */
+function chromiumDirs(browser: string): string[] | null {
+  const local = process.env.LOCALAPPDATA || "";
+  const roaming = process.env.APPDATA || "";
+  switch (browser) {
+    case "chrome": return [path.join(local, "Google", "Chrome", "User Data")];
+    case "edge": return [path.join(local, "Microsoft", "Edge", "User Data")];
+    case "brave": return [path.join(local, "BraveSoftware", "Brave-Browser", "User Data")];
+    case "chromium": return [path.join(local, "Chromium", "User Data")];
+    case "vivaldi": return [path.join(local, "Vivaldi", "User Data")];
+    case "opera": return [path.join(roaming, "Opera Software", "Opera Stable")];
+    case "opera-gx": return [path.join(roaming, "Opera Software", "Opera GX Stable")];
+    case "centbrowser": return centUserDataDirs();
+    default: return null;
+  }
+}
+
+function listDirs(dir: string): string[] {
+  try {
+    return readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+
+/** Cookie DB files (+ -wal / -journal) of a browser; null when its layout is unknown. */
+export function cookieStoreFiles(browser: string): string[] | null {
+  const bases: string[] = [];
+  if (browser === "firefox" || browser === "librewolf") {
+    const root = browser === "firefox"
+      ? path.join(process.env.APPDATA || "", "Mozilla", "Firefox", "Profiles")
+      : path.join(process.env.APPDATA || "", "librewolf", "Profiles");
+    for (const p of listDirs(root)) bases.push(path.join(root, p, "cookies.sqlite"));
+  } else {
+    const dirs = chromiumDirs(browser);
+    if (!dirs) return null;
+    for (const dir of dirs) {
+      const profiles = [".", ...listDirs(dir).filter((n) => n === "Default" || /^Profile \d+$/.test(n))];
+      for (const p of profiles) bases.push(path.join(dir, p, "Network", "Cookies"), path.join(dir, p, "Cookies"));
+    }
+  }
+  return bases.flatMap((b) => [b, `${b}-wal`, `${b}-journal`]).filter(existsSync);
+}
+
+/** mtime+size fingerprint of a browser's cookie store (fs.stat works on a locked file).
+ *  null when the store location is unknown. */
+export function cookieStoreSignature(browser: string): string | null {
+  const files = cookieStoreFiles(browser);
+  if (!files) return null;
+  return files
+    .map((f) => {
+      try {
+        const st = statSync(f);
+        return `${f}:${st.mtimeMs}:${st.size}`;
+      } catch {
+        return `${f}:gone`;
+      }
+    })
+    .sort()
+    .join("|");
 }
 
 /** Chromium-layout store: every profile's (Network\)Cookies, decrypted with the Local State key.

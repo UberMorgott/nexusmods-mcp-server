@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from "node
 import path from "node:path";
 import type { Config } from "../config.js";
 import type { CookieEntry } from "../utils/types.js";
-import { CookieExtractor } from "./cookie-extractor.js";
+import { CookieExtractor, cookieStoreSignature } from "./cookie-extractor.js";
 import { BrowserClient, FORUMS_ORIGIN, WWW_ORIGIN } from "./browser-client.js";
 import { detectDefaultBrowser, openInDefaultBrowser } from "../utils/default-browser.js";
 import { fetchAndParse, submitRequest, type ParseKind, type SubmitArgs } from "./site-parsers.js";
@@ -80,6 +80,11 @@ export class WebClient {
   protected detectDefaultBrowser = () => detectDefaultBrowser();
   protected openUrl = (url: string) => openInDefaultBrowser(url);
   protected defaultBrowserPollMs = 4000;
+  /** Cookie-store fingerprint for the default-browser poll gate; null = unknown location. */
+  protected storeSignature = (browser: string) => cookieStoreSignature(browser);
+  /** Default-browser poll: re-read an unchanged store at most this often. Reading a running
+   *  Chromium store goes through Windows Restart Manager (restarts its network process). */
+  protected forcedReadMs = 30_000;
 
   constructor(private config: Config) {
     this.loadCookies();
@@ -318,7 +323,7 @@ export class WebClient {
     }
     console.error(`[login] opened sign-in page in default browser ${name}; polling its cookies`);
     const gen = this.beginPolling("default-browser", name);
-    void this.pollDefaultBrowser(name, gen).finally(() => {
+    void this.pollDefaultBrowser(name, gen, this.safeSignature(name)).finally(() => {
       if (gen === this.loginGen) this.loginPolling = false;
     });
     return {
@@ -335,13 +340,31 @@ export class WebClient {
     return this.loginGen;
   }
 
-  private async pollDefaultBrowser(name: string, gen: number): Promise<boolean> {
+  private safeSignature(name: string): string | null {
+    try {
+      return this.storeSignature(name);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Polls the default browser's cookies. Gate: read only when the cookie DB (or its -wal)
+   *  changed since the last read, else at most once per forcedReadMs. `sig` = fingerprint
+   *  at the probe read on open. */
+  private async pollDefaultBrowser(name: string, gen: number, sig: string | null): Promise<boolean> {
     const start = Date.now();
     let last = "";
+    let lastSig = sig;
+    let lastRead = Date.now();
     try {
       while (Date.now() - start < LOGIN_TIMEOUT_MS) {
         await new Promise((r) => setTimeout(r, this.defaultBrowserPollMs));
         if (gen !== this.loginGen) return false;
+        const nowSig = this.safeSignature(name);
+        const changed = nowSig !== null && nowSig !== lastSig;
+        if (!changed && Date.now() - lastRead < this.forcedReadMs) continue;
+        lastSig = nowSig;
+        lastRead = Date.now();
         const r = await this.extractFrom(name);
         if (gen !== this.loginGen) return false;
         if (r.error || r.cookies.length === 0) continue;
